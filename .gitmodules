@@ -1,7 +1,7 @@
 [submodule "External/vixl"]
 	shallow = true
 	path = External/vixl
-	url = https://github.com/FEX-Emu/vixl.git
+	url = https://github.com/bylaws/vixl
 [submodule "External/cpp-optparse"]
 	path = Source/Common/cpp-optparse
 	url = https://github.com/Sonicadvance1/cpp-optparse
@@ -32,7 +32,7 @@
 	url = https://github.com/FEX-Emu/fex-gcc-target-tests-bins.git
 [submodule "External/jemalloc"]
 	path = External/jemalloc
-	url = https://github.com/FEX-Emu/jemalloc.git
+	url = https://github.com/bylaws/jemalloc
 [submodule "External/fmt"]
 	path = External/fmt
 	url = https://github.com/fmtlib/fmt.git
