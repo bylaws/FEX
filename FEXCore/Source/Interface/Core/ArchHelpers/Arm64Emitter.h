@@ -116,7 +116,7 @@ protected:
   std::span<const ARMEmitter::VRegister> GeneralFPRegisters {};
   uint32_t PairRegisters = 0;
 
-  void LoadConstant(ARMEmitter::Size s, ARMEmitter::Register Reg, uint64_t Constant, bool NOPPad = false);
+  void LoadConstant(ARMEmitter::Size s, ARMEmitter::Register Reg, uint64_t Constant, bool NOPPad = true);
 
   void FillSpecialRegs(ARMEmitter::Register TmpReg, ARMEmitter::Register TmpReg2, bool SetFIZ, bool SetPredRegs);
 
