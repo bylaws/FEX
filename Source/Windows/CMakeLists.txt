@@ -21,10 +21,11 @@ endfunction()
 
 build_implib(ntdll)
 build_implib(wow64)
-build_implib(kernelbase)
 
 add_subdirectory(Common)
 
-if (_M_ARM_64 AND (NOT _M_ARM_64EC))
+if (_M_ARM_64EC)
+  add_subdirectory(ARM64EC)
+elseif (_M_ARM_64)
   add_subdirectory(WOW64)
 endif()

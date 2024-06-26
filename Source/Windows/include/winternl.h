@@ -13,6 +13,78 @@ extern "C" {
 
 #define WOW64_TLS_MAX_NUMBER 19
 
+#ifdef _M_ARM_64EC
+typedef struct _CHPE_V2_CPU_AREA_INFO {
+  BOOLEAN InSimulation;             /* 000 */
+  BOOLEAN InSyscallCallback;        /* 001 */
+  ULONG64 EmulatorStackBase;        /* 008 */
+  ULONG64 EmulatorStackLimit;       /* 010 */
+  ARM64EC_NT_CONTEXT* ContextAmd64; /* 018 */
+  ULONG* SuspendDoorbell;           /* 020 */
+  ULONG64 LoadingModuleModflag;     /* 028 */
+  void* EmulatorData[4];            /* 030 */
+  ULONG64 EmulatorDataInline;       /* 050 */
+} CHPE_V2_CPU_AREA_INFO, *PCHPE_V2_CPU_AREA_INFO;
+#endif
+
+typedef struct _UNICODE_STRING64
+{
+  USHORT  Length;
+  USHORT  MaximumLength;
+  ULONG64 Buffer;
+} UNICODE_STRING64;
+
+typedef struct _CURDIR64
+{
+    UNICODE_STRING64 DosPath;
+    ULONG64 Handle;
+} CURDIR64;
+
+typedef struct RTL_DRIVE_LETTER_CURDIR64
+{
+    USHORT              Flags;
+    USHORT              Length;
+    ULONG               TimeStamp;
+    UNICODE_STRING64    DosPath;
+} RTL_DRIVE_LETTER_CURDIR64;
+
+typedef struct _RTL_USER_PROCESS_PARAMETERS64
+{
+    ULONG               AllocationSize;
+    ULONG               Size;
+    ULONG               Flags;
+    ULONG               DebugFlags;
+    ULONG64             ConsoleHandle;
+    ULONG               ConsoleFlags;
+    ULONG64             hStdInput;
+    ULONG64             hStdOutput;
+    ULONG64             hStdError;
+    CURDIR64            CurrentDirectory;
+    UNICODE_STRING64    DllPath;
+    UNICODE_STRING64    ImagePathName;
+    UNICODE_STRING64    CommandLine;
+    ULONG64             Environment;
+    ULONG               dwX;
+    ULONG               dwY;
+    ULONG               dwXSize;
+    ULONG               dwYSize;
+    ULONG               dwXCountChars;
+    ULONG               dwYCountChars;
+    ULONG               dwFillAttribute;
+    ULONG               dwFlags;
+    ULONG               wShowWindow;
+    UNICODE_STRING64    WindowTitle;
+    UNICODE_STRING64    Desktop;
+    UNICODE_STRING64    ShellInfo;
+    UNICODE_STRING64    RuntimeInfo;
+    RTL_DRIVE_LETTER_CURDIR64 DLCurrentDirectory[0x20];
+    ULONG64             EnvironmentSize;
+    ULONG64             EnvironmentVersion;
+    ULONG64             PackageDependencyData;
+    ULONG               ProcessGroupId;
+    ULONG               LoaderThreads;
+} RTL_USER_PROCESS_PARAMETERS64;
+
 typedef struct _THREAD_BASIC_INFORMATION {
   NTSTATUS ExitStatus;
   PVOID TebBaseAddress;
@@ -95,6 +167,10 @@ NTSTATUS WINAPI RtlWow64SetThreadContext(HANDLE, const WOW64_CONTEXT*);
 NTSTATUS WINAPI RtlWow64GetThreadContext(HANDLE, WOW64_CONTEXT*);
 NTSTATUS WINAPI RtlWow64GetCurrentCpuArea(USHORT*, void**, void**);
 
+NTSYSAPI void      WINAPI RtlAcquirePebLock(void);
+NTSYSAPI void      WINAPI RtlReleasePebLock(void);
+NTSYSAPI NTSTATUS  WINAPI NtQueryAttributesFile(const OBJECT_ATTRIBUTES*,FILE_BASIC_INFORMATION*);
+NTSYSAPI NTSTATUS  WINAPI RtlUnicodeToMultiByteN(LPSTR,DWORD,LPDWORD,LPCWSTR,DWORD);
 NTSTATUS WINAPI NtSuspendThread(HANDLE, PULONG);
 NTSTATUS WINAPI NtGetContextThread(HANDLE, CONTEXT*);
 NTSTATUS WINAPI NtContinue(PCONTEXT, BOOLEAN);

@@ -160,8 +160,8 @@ if (ENABLE_GLIBC_ALLOCATOR_HOOK_FAULT)
   list(APPEND FEXCORE_BASE_SRCS
     Utils/AllocatorOverride.cpp)
 endif()
-
-set(DEFINES -DTHREAD_LOCAL=_Thread_local -DJIT_ARM64)
+#FIXMEEEE
+set(DEFINES -DJIT_ARM64)
 
 if (_M_X86_64)
   list(APPEND DEFINES -D_M_X86_64=1)
