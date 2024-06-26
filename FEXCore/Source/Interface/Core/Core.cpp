@@ -969,6 +969,11 @@ void ContextImpl::MarkMemoryShared(FEXCore::Core::InternalThreadState* Thread) {
   }
 }
 
+void ContextImpl::AddNoTSOCodeRange(uint64_t Start, uint64_t Length) {
+  std::scoped_lock lk(CodeInvalidationMutex);
+  NoTSORanges.Insert({Start, Start + Length});
+}
+
 void ContextImpl::ThreadAddBlockLink(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestDestination,
                                      FEXCore::Context::ExitFunctionLinkData* HostLink, const FEXCore::Context::BlockDelinkerFunc& delinker) {
   auto lk = GuardSignalDeferringSection<std::shared_lock>(static_cast<ContextImpl*>(Thread->CTX)->CodeInvalidationMutex, Thread);

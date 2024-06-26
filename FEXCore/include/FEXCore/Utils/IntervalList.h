@@ -121,7 +121,7 @@ public:
     Intervals.erase(EraseStartIt, EraseEndIt);
   }
 
-  QueryResult Query(SizeType Offset) {
+  QueryResult Query(SizeType Offset) const {
     const auto It = std::upper_bound(Intervals.begin(), Intervals.end(), Offset, [](const auto& LHS, const auto& RHS) {
       return LHS < RHS.End;
     }); // Lowest offset interval that (maybe) overlaps with the query offset
@@ -135,7 +135,7 @@ public:
     }
   }
 
-  bool Intersect(Interval Entry) {
+  bool Intersect(Interval Entry) const {
     const auto It = std::upper_bound(Intervals.begin(), Intervals.end(), Entry, [](const auto& LHS, const auto& RHS) {
       return LHS.Offset < RHS.End;
     }); // Lowest offset interval that (maybe) overlaps with the query offset
