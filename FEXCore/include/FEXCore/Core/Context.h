@@ -244,6 +244,7 @@ public:
   FEX_DEFAULT_VISIBILITY virtual FEXCore::ForkableSharedMutex& GetCodeInvalidationMutex() = 0;
 
   FEX_DEFAULT_VISIBILITY virtual void MarkMemoryShared(FEXCore::Core::InternalThreadState* Thread) = 0;
+  FEX_DEFAULT_VISIBILITY virtual void AddNoTSOCodeRange(uint64_t Start, uint64_t Length) = 0;
 
   FEX_DEFAULT_VISIBILITY virtual void
   ConfigureAOTGen(FEXCore::Core::InternalThreadState* Thread, fextl::set<uint64_t>* ExternalBranches, uint64_t SectionMaxAddress) = 0;

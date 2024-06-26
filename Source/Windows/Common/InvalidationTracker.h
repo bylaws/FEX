@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: MIT
 #pragma once
 
-#include "IntervalList.h"
+#include <FEXCore/Utils/IntervalList.h>
 #include <mutex>
 #include <unordered_map>
 

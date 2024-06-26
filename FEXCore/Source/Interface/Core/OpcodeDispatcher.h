@@ -2472,7 +2472,7 @@ private:
   uint64_t Entry;
 
   Ref _StoreMemAutoTSO(FEXCore::IR::RegisterClassType Class, uint8_t Size, Ref Addr, Ref Value, uint8_t Align = 1) {
-    if (CTX->IsAtomicTSOEnabled()) {
+    if (CTX->IsAtomicTSOEnabled(Entry)) {
       return _StoreMemTSO(Class, Size, Value, Addr, Invalid(), Align, MEM_OFFSET_SXTX, 1);
     } else {
       return _StoreMem(Class, Size, Value, Addr, Invalid(), Align, MEM_OFFSET_SXTX, 1);
@@ -2480,7 +2480,7 @@ private:
   }
 
   Ref _LoadMemAutoTSO(FEXCore::IR::RegisterClassType Class, uint8_t Size, Ref ssa0, uint8_t Align = 1) {
-    if (CTX->IsAtomicTSOEnabled()) {
+    if (CTX->IsAtomicTSOEnabled(Entry)) {
       return _LoadMemTSO(Class, Size, ssa0, Invalid(), Align, MEM_OFFSET_SXTX, 1);
     } else {
       return _LoadMem(Class, Size, ssa0, Invalid(), Align, MEM_OFFSET_SXTX, 1);
@@ -2488,7 +2488,7 @@ private:
   }
 
   Ref _LoadMemAutoTSO(FEXCore::IR::RegisterClassType Class, uint8_t Size, AddressMode A, uint8_t Align = 1) {
-    bool AtomicTSO = CTX->IsAtomicTSOEnabled() && !A.NonTSO;
+    bool AtomicTSO = CTX->IsAtomicTSOEnabled(Entry) && !A.NonTSO;
     A = SelectAddressMode(A, AtomicTSO, Class != GPRClass, Size);
 
     if (AtomicTSO) {
@@ -2499,7 +2499,7 @@ private:
   }
 
   Ref _StoreMemAutoTSO(FEXCore::IR::RegisterClassType Class, uint8_t Size, AddressMode A, Ref Value, uint8_t Align = 1) {
-    bool AtomicTSO = CTX->IsAtomicTSOEnabled() && !A.NonTSO;
+    bool AtomicTSO = CTX->IsAtomicTSOEnabled(Entry) && !A.NonTSO;
     A = SelectAddressMode(A, AtomicTSO, Class != GPRClass, Size);
 
     if (AtomicTSO) {
