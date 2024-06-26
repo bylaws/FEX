@@ -132,6 +132,9 @@ endif()
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "^aarch64|^arm64|^armv8\.*")
   set(_M_ARM_64 1)
   add_definitions(-D_M_ARM_64=1)
+
+  set(ENABLE_JEMALLOC FALSE)
+  set(ENABLE_JEMALLOC_GLIBC_ALLOC FALSE)
 endif()
 
 if (CMAKE_SYSTEM_PROCESSOR MATCHES "^arm64ec")
