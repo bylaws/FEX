@@ -423,6 +423,7 @@ public:
   }
 
   uint64_t HandleSyscall(FEXCore::Core::CpuStateFrame* Frame, FEXCore::HLE::SyscallArguments* Args) override {
+    ProcessPendingCrossProcessEmulatorWork();
     Frame->State.rip = NtDllBase + NtDllSyscallLUT[Frame->State.gregs[FEXCore::X86State::REG_RAX]];
     Frame->State.gregs[FEXCore::X86State::REG_RCX] = Frame->State.gregs[FEXCore::X86State::REG_R10];
     return 0;
@@ -442,6 +443,7 @@ public:
 };
 
 extern "C" void SyncThreadContext(CONTEXT* Context) {
+  ProcessPendingCrossProcessEmulatorWork();
   auto* Thread = GetCPUArea().ThreadState();
   // All other EFlags bits are lost when converting to/from an ARM64EC context, so merge them in from the current JIT state.
   // This is advisable over dropping their values as thread suspend/resume uses this function, and that can happen at any point in guest code.
