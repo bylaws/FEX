@@ -1086,10 +1086,18 @@ void Decoder::DecodeInstructionsAtEntry(const uint8_t* _InstStream, uint64_t PC,
   while (!FinalInstruction && !BlocksToDecode.empty()) {
     auto BlockDecodeIt = BlocksToDecode.begin();
     uint64_t RIPToDecode = *BlockDecodeIt;
-    BlockInfo.Blocks.emplace_back();
-    DecodedBlocks& CurrentBlockDecoding = BlockInfo.Blocks.back();
+    BlocksToDecode.erase(BlockDecodeIt);
+    HasBlocks.emplace(RIPToDecode);
 
-    CurrentBlockDecoding.Entry = RIPToDecode;
+    auto BlockPredIt = std::lower_bound(BlockInfo.Blocks.begin(), BlockInfo.Blocks.end(), RIPToDecode,
+		    [](const auto& a, const auto& b) {
+      return a.Entry < b.Entry;
+    });
+
+    if (BlockPredIt->Entry == RIPToDecode) continue; // Already visited
+    auto BlockIt = BlockInfo.Blocks.emplace(std::next(BlockPredIt));
+
+    BlockIt->Entry = RIPToDecode;
 
     uint64_t PCOffset = 0;
     uint64_t BlockNumberOfInstructions {};
@@ -1126,17 +1134,15 @@ void Decoder::DecodeInstructionsAtEntry(const uint8_t* _InstStream, uint64_t PC,
 
       if (ErrorDuringDecoding) [[unlikely]] {
         // Put an invalid instruction in the stream so the core can raise SIGILL if hit
-        CurrentBlockDecoding.HasInvalidInstruction = true;
+        BlockIt->HasInvalidInstruction = true;
         // Error while decoding instruction. We don't know the table or instruction size
         DecodeInst->TableInfo = nullptr;
         DecodeInst->InstSize = 0;
-      }
-
-      if (!ErrorDuringDecoding) {
+      } else {
         // If there wasn't an error during decoding but we have no dispatcher for the instruction then claim invalid instruction.
-        auto TableInfo = DecodedBuffer[BlockStartOffset + BlockNumberOfInstructions].TableInfo;
+        auto TableInfo = DecodeInst->TableInfo;
         if (!TableInfo || !TableInfo->OpcodeDispatcher) {
-          CurrentBlockDecoding.HasInvalidInstruction = true;
+          BlockIt->HasInvalidInstruction = true;
         }
       }
 
@@ -1147,12 +1153,12 @@ void Decoder::DecodeInstructionsAtEntry(const uint8_t* _InstStream, uint64_t PC,
       ++DecodedSize;
 
       // Can not continue this block at all on invalid instruction
-      if (CurrentBlockDecoding.HasInvalidInstruction) [[unlikely]] {
+      if (BlockIt->HasInvalidInstruction) [[unlikely]] {
         if (!EntryBlock) {
           // In multiblock configurations, we can early terminate any non-entrypoint blocks with the expectation that this won't get hit.
           // Improves compile-times.
           // Just need to undo additions that this block decoding has caused.
-          TotalInstructions -= CurrentBlockDecoding.NumInstructions;
+          TotalInstructions -= BlockNumberOfInstructions;
           DecodedSize = BlockStartOffset;
           BlockNumberOfInstructions = 0;
           InstStream -= PCOffset;
@@ -1190,26 +1196,18 @@ void Decoder::DecodeInstructionsAtEntry(const uint8_t* _InstStream, uint64_t PC,
     BlocksToDecode.merge(CurrentBlockTargets);
     CurrentBlockTargets.clear();
 
-    BlocksToDecode.erase(BlockDecodeIt);
-    HasBlocks.emplace(RIPToDecode);
-
     // Copy over only the number of instructions we decoded
-    CurrentBlockDecoding.NumInstructions = BlockNumberOfInstructions;
-    CurrentBlockDecoding.DecodedInstructions = &DecodedBuffer[BlockStartOffset];
-    BlockInfo.TotalInstructionCount += BlockNumberOfInstructions;
+    BlockIt->NumInstructions = BlockNumberOfInstructions;
+    BlockIt->DecodedInstructions = &DecodedBuffer[BlockStartOffset];
 
     EntryBlock = false;
   }
 
+  BlockInfo.TotalInstructionCount = TotalInstructions;
+
   for (auto CodePage : CodePages) {
     AddContainedCodePage(PC, CodePage, FEXCore::Utils::FEX_PAGE_SIZE);
   }
-
-  // sort for better branching
-  std::sort(BlockInfo.Blocks.begin(), BlockInfo.Blocks.end(),
-            [](const FEXCore::Frontend::Decoder::DecodedBlocks& a, const FEXCore::Frontend::Decoder::DecodedBlocks& b) {
-    return a.Entry < b.Entry;
-  });
 }
 
 } // namespace FEXCore::Frontend
