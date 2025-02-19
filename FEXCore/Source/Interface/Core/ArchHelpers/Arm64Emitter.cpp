@@ -432,8 +432,11 @@ void Arm64Emitter::LoadConstant(ARMEmitter::Size s, ARMEmitter::Register Reg, ui
     return;
   }
 
-  if ((Constant >> 32) == 0) {
+  if ((Constant >> 32) == 0 && !NOPPad) {
     // If the upper 32-bits is all zero, we can now switch to a 32-bit move.
+    // NOTE: Since the constant may be computed from a guest PC location,
+    //       this is disabled when NOP padding is requested. This ensures
+    //       consistent code output size.
     s = ARMEmitter::Size::i32Bit;
     Is64Bit = false;
     Segments = 2;
