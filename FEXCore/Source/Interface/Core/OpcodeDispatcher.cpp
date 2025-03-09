@@ -700,7 +700,7 @@ void OpDispatchBuilder::CondJUMPOp(OpcodeArgs) {
     if (TargetOffset < 0 && -TargetOffset > InstRIP) {
       // Invert the signed value if we are underflowing
       TargetOffset = 0x1'0000'0000ULL + TargetOffset;
-    } else if (TargetOffset >= 0 && Target >= 0x1'0000'0000ULL) {
+    } else if (TargetOffset >= 0 && (Target ^ InstRIP) & 0x1'0000'0000ULL) {
       // We are overflowing, wrap around
       TargetOffset = TargetOffset - 0x1'0000'0000ULL;
     }
