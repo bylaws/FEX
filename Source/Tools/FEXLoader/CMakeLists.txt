@@ -7,8 +7,7 @@ endif()
 
 function(GenerateInterpreter NAME AsInterpreter)
   add_executable(${NAME}
-    FEXLoader.cpp
-    AOT/AOTGenerator.cpp)
+    FEXLoader.cpp)
 
   target_compile_definitions(${NAME} PRIVATE ${DEFINES})
 
