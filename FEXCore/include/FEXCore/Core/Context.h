@@ -166,13 +166,14 @@ public:
   FEX_DEFAULT_VISIBILITY virtual FEXCore::CPUID::FunctionResults RunCPUIDFunctionName(uint32_t Function, uint32_t Leaf, uint32_t CPU) = 0;
 
   FEX_DEFAULT_VISIBILITY virtual FEXCore::IR::AOTIRCacheEntry* LoadAOTIRCacheEntry(const fextl::string& Name) = 0;
+  FEX_DEFAULT_VISIBILITY virtual void FetchAOTIRCacheEntry(FEXCore::Core::InternalThreadState* Thread, uintptr_t GuestRIP) = 0;
   FEX_DEFAULT_VISIBILITY virtual void UnloadAOTIRCacheEntry(FEXCore::IR::AOTIRCacheEntry* Entry) = 0;
 
   FEX_DEFAULT_VISIBILITY virtual void SetAOTIRLoader(AOTIRLoaderCBFn CacheReader) = 0;
   FEX_DEFAULT_VISIBILITY virtual void SetAOTIRWriter(AOTIRWriterCBFn CacheWriter) = 0;
   FEX_DEFAULT_VISIBILITY virtual void SetAOTIRRenamer(AOTIRRenamerCBFn CacheRenamer) = 0;
 
-  FEX_DEFAULT_VISIBILITY virtual void FinalizeAOTIRCache() = 0;
+  FEX_DEFAULT_VISIBILITY virtual void FinalizeAOTIRCache(FEXCore::Core::InternalThreadState&, int fd, uint64_t BaseGuestEntry) = 0;
   FEX_DEFAULT_VISIBILITY virtual void WriteFilesWithCode(AOTIRCodeFileWriterFn Writer) = 0;
 
   FEX_DEFAULT_VISIBILITY virtual void ClearCodeCache(FEXCore::Core::InternalThreadState* Thread, bool NewCodeBuffer = true) = 0;

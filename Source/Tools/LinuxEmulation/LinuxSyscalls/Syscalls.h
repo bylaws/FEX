@@ -266,7 +266,7 @@ public:
   uint64_t GuestShmdt(bool Is64Bit, FEXCore::Core::InternalThreadState*, const void* shmaddr);
 
   ///// Memory Manager tracking /////
-  void TrackMmap(FEXCore::Core::InternalThreadState* Thread, uint64_t addr, size_t length, int prot, int flags, int fd, off_t offset);
+  FEXCore::IR::AOTIRCacheEntry* TrackMmap(FEXCore::Core::InternalThreadState* Thread, uint64_t addr, size_t length, int prot, int flags, int fd, off_t offset);
   void TrackMunmap(FEXCore::Core::InternalThreadState* Thread, void* addr, size_t length);
   void TrackMremap(FEXCore::Core::InternalThreadState* Thread, uint64_t OldAddress, size_t OldSize, size_t NewSize, int flags, uint64_t NewAddress);
   void TrackShmat(FEXCore::Core::InternalThreadState* Thread, int shmid, uint64_t shmaddr, int shmflg, uint64_t Length);
@@ -304,6 +304,7 @@ public:
   void InvalidateGuestCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) override;
   // AOTIRCacheEntryLookupResult also includes a shared lock guard, so the pointed AOTIRCacheEntry return can be safely used
   FEXCore::HLE::AOTIRCacheEntryLookupResult LookupAOTIRCacheEntry(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestAddr) final override;
+  void ForEachVMAMapping(FEXCore::Core::InternalThreadState*, std::function<void(uint64_t)>) override;
 
   FEXCore::HLE::ExecutableRangeInfo QueryGuestExecutableRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Address) override;
 

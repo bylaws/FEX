@@ -238,7 +238,7 @@ struct mutable_buffer {
     } while (Current);
 
     if (Ret == 0) {
-      assert(!FD);
+      // assert(!FD);
     }
     return Ret;
   }
@@ -350,6 +350,61 @@ void async_read_until(AsyncReadStream& Stream, dynamic_vector_buffer Buffers, Ma
 
   // Check existing data for a predicate match, then initiate async reading if necessary
   Callback {0, Buffers.Data.size(), Stream, Buffers, std::move(Predicate), std::move(UserCallback)}(error::success, 0, std::nullopt);
+}
+
+/**
+ * Synchronously reads data from the given stream until MatchPredicate reports a match. This call
+ * blocks further execution until the operation is complete.
+ *
+ * MatchPredicate must have the signature pair<Iter, bool>(Iter, Iter):
+ * - The input iterators provide the range of new data bytes
+ * - The returned boolean indicates if a match was found
+ * - The returned iterator is the match location or the location at which to continue testing after the next read
+ *
+ * The read data will be appended to Buffers. Data past the match returned from the last read data will also be included.
+ *
+ * Corresponds to asio::read_until.
+ */
+template<typename AsyncReadStream, typename MatchPredicate, typename OnComplete>
+requires std::is_invocable_r_v<void, OnComplete, error, size_t>
+std::size_t read_until(AsyncReadStream& Stream, dynamic_vector_buffer Buffers, MatchPredicate Predicate, error& ec) {
+  size_t BeginPos = 0;
+  size_t EndPos = Buffers.Data.size();
+  error Err = error::success;
+
+  // TODO: Add support for this?
+  // std::optional<int> FD;
+
+  do {
+    if (Err != error::success) {
+      ec = Err;
+      return 0;
+    }
+
+    // Start with the predicate check to avoid fetching data unnecessarily
+    if (EndPos != BeginPos) {
+      auto Begin = Buffers.Data.begin() + BeginPos;
+      auto End = Buffers.Data.begin() + EndPos;
+      auto [It, Found] = Predicate(Begin, End);
+      BeginPos = It - Buffers.Data.begin();
+      if (Found) {
+        Buffers.Data.resize(EndPos); // Shrink down to size of data actually received
+        return BeginPos;
+      }
+    }
+
+    // Fill the entire remaining capacity, or resize for a minimum of 512 bytes
+    auto BytesToRead = std::max<size_t>(std::min(Buffers.Data.capacity(), Buffers.max_size) - EndPos, 512);
+    if (Buffers.Data.size() + BytesToRead > Buffers.max_size) {
+      ERROR_AND_DIE_FMT("Out of buffer space");
+    }
+
+    Buffers.Data.resize(EndPos + BytesToRead);
+
+    // Queue data read.
+    // On completion, Reader will check if enough data was received and will queue more reads if needed.
+    EndPos += Stream.read_some(mutable_buffer {std::span {Buffers.Data}}, Err);
+  } while (true);
 }
 
 using read_callback = fextl::move_only_function<void(error, size_t, std::optional<int>)>;

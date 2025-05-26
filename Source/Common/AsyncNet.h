@@ -126,6 +126,9 @@ private:
       iov[NumIovs].iov_len = Buffer->Data.size_bytes();
       ++NumIovs;
     }
+    if (iov[0].iov_len == 0) {
+      NumIovs = 0;
+    }
     msghdr msg {
       .msg_name = nullptr,
       .msg_namelen = 0,
@@ -160,11 +163,9 @@ private:
     struct cmsghdr* cmsg = CMSG_FIRSTHDR(&msg);
     if (Buffers.FD &&
         (cmsg == nullptr || cmsg->cmsg_len != CMSG_LEN(sizeof(int)) || cmsg->cmsg_level != SOL_SOCKET || cmsg->cmsg_type != SCM_RIGHTS)) {
-      ec = error::invalid;
-      return 0;
-    }
-
-    if (Buffers.FD) {
+      // ec = error::invalid;
+      // return 0;
+    } else if (Buffers.FD) {
       memcpy(*Buffers.FD, CMSG_DATA(cmsg), sizeof(FD));
     }
 

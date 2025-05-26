@@ -5,6 +5,7 @@
 
 #include <Common/AsyncNet.h>
 #include <Common/FEXServerClient.h>
+#include <FEXCore/Utils/EnumUtils.h>
 
 #include <fmt/ranges.h>
 
@@ -12,12 +13,41 @@
 #include <cassert>
 #include <fcntl.h>
 #include <filesystem>
+#include <fstream>
 #include <poll.h>
 #include <string>
+#include <sys/file.h>
 #include <sys/resource.h>
 #include <sys/socket.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <vector>
+
+
+#include "Tools/FEXLoader/ELFCodeLoader.h"
+#include "Linux/Utils/ELFParser.h"
+#include "FEXCore/Core/Context.h"
+#include "Common/HostFeatures.h"
+// #include "DummyHandlers.h"
+#include "Tools/LinuxEmulation/LinuxSyscalls/x64/Syscalls.h"
+
+#include <xxhash.h>
+
+struct FileIdWithPath {
+  std::string FileId;
+  std::string Filename;
+
+  bool operator<(const FileIdWithPath& Oth) const noexcept {
+    return FileId < Oth.FileId;
+  }
+};
+
+template<>
+struct std::hash<FileIdWithPath> {
+  std::size_t operator()(const FileIdWithPath& Val) const noexcept {
+    return std::hash<std::string>{}(Val.FileId);
+  }
+};
 
 namespace ProcessPipe {
 constexpr int USER_PERMS = S_IRWXU | S_IRWXG | S_IRWXO;
@@ -117,7 +147,7 @@ bool InitializeServerPipe() {
     ServerLockFD = open(ServerLockPath.c_str(), O_RDWR | O_CLOEXEC, USER_PERMS);
     if (ServerLockFD != -1) {
       // Now that we have opened the file, try to get a write lock.
-      flock lk {
+      struct flock lk {
         .l_type = F_WRLCK,
         .l_whence = SEEK_SET,
         .l_start = 0,
@@ -144,7 +174,7 @@ bool InitializeServerPipe() {
     return false;
   } else {
     // FIFO file was created. Try to get a write lock
-    flock lk {
+    struct flock lk {
       .l_type = F_WRLCK,
       .l_whence = SEEK_SET,
       .l_start = 0,
@@ -161,7 +191,7 @@ bool InitializeServerPipe() {
   }
 
   // Now that a write lock is held, downgrade it to a read lock
-  flock lk {
+  struct flock lk {
     .l_type = F_RDLCK,
     .l_whence = SEEK_SET,
     .l_start = 0,
@@ -261,13 +291,38 @@ void SendFDSuccessPacket(fasio::tcp_socket& Socket, int FD) {
   write(Socket, Data, ec);
 }
 
+int32_t EmbedSubprocess(const char* path, char* const* args) {
+  pid_t pid = fork();
+  if (pid == 0) {
+    execvp(path, args);
+    _exit(-1);
+  } else {
+    int32_t Status {};
+    while (waitpid(pid, &Status, 0) == -1 && errno == EINTR)
+      ;
+    if (WIFEXITED(Status)) {
+      return (int8_t)WEXITSTATUS(Status);
+    }
+  }
+
+  return -1;
+}
+
+static int RunOfflineCompiler(FileIdWithPath SourceBinary, const char* CodeMap) {
+    const char* ExecveArgs[] = { "FEXOfflineCompiler", "generate", SourceBinary.Filename.c_str(), SourceBinary.FileId.c_str(), "--codemap", CodeMap, nullptr };
+    return EmbedSubprocess("FEXOfflineCompiler", const_cast<char* const*>(&ExecveArgs[0]));
+};
+
 void HandleSocketData(fasio::tcp_socket& Socket) {
   std::vector<uint8_t> Data(1500);
 
   // Get the current number of FDs of the process before we start handling sockets.
   GetMaxFDs();
 
-  fasio::mutable_buffer buffer = {std::as_writable_bytes(std::span(Data))};
+  // fasio::mutable_buffer buffer = {std::as_writable_bytes(std::span(Data))};
+  fasio::mutable_buffer buffer = {std::as_writable_bytes(std::span(Data).subspan(0, 4))};
+  int inFD = -1;
+  buffer.FD = &inFD;
 
   {
     fasio::error ec;
@@ -276,10 +331,10 @@ void HandleSocketData(fasio::tcp_socket& Socket) {
     if (ec == fasio::error::success) {
       assert(Read >= sizeof(FEXServerClient::FEXServerRequestPacket));
       buffer = {buffer.Data.subspan(0, Read)};
-    } else if (ec == fasio::error::eof) {
+    } else if (ec == fasio::error::generic_errno) {
+      perror("read");
       return;
     } else {
-      perror("read");
       return;
     }
   }
@@ -369,6 +424,240 @@ void HandleSocketData(fasio::tcp_socket& Socket) {
       buffer += sizeof(FEXServerClient::FEXServerRequestPacket::Header);
       break;
     }
+
+    case FEXServerClient::PacketType::TYPE_QUERY_CODE_CACHE: {
+      char Tmp[PATH_MAX];
+      int TmpLen = FEX::get_fdpath(inFD, Tmp);
+      assert(TmpLen != -1);
+
+      // TODO: Move to common code
+      // TODO: Use file id from ELF build id instead
+      // TODO: Capture external configuration more accurately
+      std::filesystem::path Path { std::string_view(Tmp, TmpLen) };
+      auto Filename = Path.filename().string();
+      auto filename_hash = XXH3_64bits(Tmp, TmpLen);
+      auto fileid = fmt::format("{}-{:016x}-{}{}{}", Filename, filename_hash,
+                                /*(SMCChecks == FEXCore::Config::CONFIG_SMC_FULL) ? 'S' :*/ 's', /*TSOEnabled*/true ? 'T' : 't',
+                                /*CTX->Config.ABILocalFlags ? 'L' :*/ 'l');
+
+      FileIdWithPath MainFileId = { fileid, std::string(Tmp, TmpLen) };
+      fmt::print("Requested cache for: {}\n", MainFileId.Filename);
+
+      // Detect code maps by incrementing index
+      // TODO: If there are any (or more than N) pending code maps, stop handing out new code map FDs
+      std::vector<std::string> CodeMaps;
+      for (int Index = 0; true; ++Index) {
+        auto CodeMap = fmt::format("/tmp/fexcode/{}.{}.bin", Filename, Index);
+        auto FD = open(CodeMap.c_str(), O_RDONLY);
+        if (FD == -1) {
+          break;
+        }
+
+        // Acquire exclusive lock to ensure the client process is done writing data.
+        // Also ensure the file is non-empty, otherwise we're racing the client in acquiring the initial lock.
+        // TODO: The file could also end up empty if another thread crashes during dumping
+        struct stat FileStats;
+        fstat(FD, &FileStats);
+        if (FileStats.st_size == 0 || flock(FD, LOCK_EX | LOCK_NB) != 0) {
+          fmt::print("Code map {} is still in use, skipping\n", CodeMap);
+          // Still being written to by a client process, so skip this file
+          // TODO: Rename from X.n.bin to X.0.bin (once the latter has been removed!) to ensure we'll catch it on next run
+          close(FD);
+          continue;
+        }
+        close(FD);
+        CodeMaps.push_back(CodeMap);
+      }
+
+// TODO: Eh.
+auto ParseCodeMap = [](std::ifstream& Codemap) {
+  std::map<FileIdWithPath, fextl::set<uintptr_t>> Ret;
+  while (true) {
+    std::string Filename;
+    std::getline(Codemap, Filename, '\0');
+    std::string FileId;
+    std::getline(Codemap, FileId, '\0');
+    uint64_t Start, Size;
+    Codemap.read(reinterpret_cast<char*>(&Start), sizeof(Start));
+    Codemap.read(reinterpret_cast<char*>(&Size), sizeof(Size));
+    if (!Codemap) {
+      break;
+    }
+    Ret[FileIdWithPath{FileId, Filename}].insert(Start);
+  }
+  return Ret;
+};
+
+      // Trigger recompile if unprocessed (pending but finalized) code maps exist
+      // TODO: Debounce this though. Only recompile if "time_since_last_offline_compile * size_of_codemap / size_of_existing_cache > N"
+      if (!CodeMaps.empty()) {
+        fmt::print("Found {} new code maps, triggering cache generation\n", CodeMaps.size());
+
+        // 1. Parse NEW code maps
+        std::map<FileIdWithPath, fextl::set<uintptr_t>> IncomingCodeMap;
+        for (auto& CodeMap : CodeMaps) {
+          std::ifstream Incoming(CodeMap);
+          for (auto& [Filename, Blocks] : ParseCodeMap(Incoming)) {
+            IncomingCodeMap[Filename].merge(Blocks);
+          }
+        }
+
+        // 2. For each referenced library, add referenced offsets to that library's reference code map
+        for (const auto& [File, NewBlocks] : IncomingCodeMap) {
+          if (File.FileId == MainFileId.FileId) {
+            continue;
+          }
+
+          fmt::print("Processing library {} ({})\n", File.Filename, File.FileId);
+
+          const auto& BinaryName = File.FileId;
+          {
+            auto Blocks = NewBlocks;
+
+            if (auto ReferenceCodeMap = std::ifstream("/tmp/fexcode/merged." + BinaryName)) {
+              auto PreviousBlocks = ParseCodeMap(ReferenceCodeMap)[File];
+              auto NumPreviousBlocks = PreviousBlocks.size();
+              Blocks.merge(PreviousBlocks);
+              if (Blocks.size() == NumPreviousBlocks) {
+                // No blocks added; skip this library
+                fmt::print("No new blocks; skipping (current {})\n", NumPreviousBlocks);
+                continue;
+              } else {
+                fmt::print("Found {} new blocks (previous {})\n", Blocks.size() - NumPreviousBlocks, NumPreviousBlocks);
+              }
+            }
+
+            {
+              std::ofstream Output("/tmp/fexcode/merged." + BinaryName, std::ios_base::out | std::ios_base::trunc);
+              fmt::print("Writing {} blocks to {}\n", Blocks.size(), "/tmp/fexcode/merged." + BinaryName);
+              for (auto& Block : Blocks) {
+                Output.write(File.Filename.c_str(), File.Filename.size() + 1);
+                Output.write(File.FileId.c_str(), File.FileId.size() + 1);
+                Output.write(reinterpret_cast<const char*>(&Block), sizeof(Block));
+                uint64_t Size = 0; // TODO: Not sure if we should actually track this
+                Output.write(reinterpret_cast<char*>(&Size), sizeof(Size));
+              }
+            }
+
+            // Export Fossilize database
+            {
+              auto MergedFilename = "/tmp/fexcode/merged." + BinaryName;
+              auto MergedFozFilename = MergedFilename + ".foz";
+              const char* ExecveArgs[] = { "FEXOfflineCompiler", "to-foz", MergedFilename.c_str(), "--output", MergedFozFilename.c_str(), nullptr };
+              EmbedSubprocess("FEXOfflineCompiler", const_cast<char* const*>(&ExecveArgs[0]));
+            }
+          }
+
+          // Generate cache for each referenced library (if it has new code map entries)
+          // TODO: For libraries that are loaded in a sandbox (e.g. pressure vessel), this will fail. We should retry once the library is actually loaded at runtime
+          int Status = RunOfflineCompiler(File, ("/tmp/fexcode/merged." + BinaryName).c_str());
+          if (Status != 0) {
+            fmt::println("ERROR: Cache generation failed with status {}", Status);
+          }
+        }
+
+        // 3. Merge all code maps into executable (TODO: We only do this to have a list of referenced libraries per executable; this list should just be a dedicated section in the code map!)
+        // TODO: Either way, consider processing this *before* any of the libraries
+        const auto MergedFilename = "/tmp/fexcode/merged." + MainFileId.FileId;
+        do {
+          auto& Blocks = IncomingCodeMap[MainFileId];
+          if (auto ReferenceCodeMap = std::ifstream(MergedFilename)) {
+            auto PreviousBlocks = ParseCodeMap(ReferenceCodeMap)[MainFileId];
+            auto NumPreviousBlocks = PreviousBlocks.size();
+            Blocks.merge(PreviousBlocks);
+            if (Blocks.size() == NumPreviousBlocks) {
+              // No blocks added; skip this binary
+              break;
+            } else {
+              fmt::print("Found {} new blocks (previous {})\n", Blocks.size() - NumPreviousBlocks, NumPreviousBlocks);
+            }
+          }
+
+          {
+            std::ofstream Output(MergedFilename, std::ios_base::out | std::ios_base::trunc);
+            for (auto& Block : Blocks) {
+              Output.write(MainFileId.Filename.c_str(), MainFileId.Filename.size() + 1);
+              Output.write(MainFileId.FileId.c_str(), MainFileId.FileId.size() + 1);
+              Output.write(reinterpret_cast<const char*>(&Block), sizeof(Block));
+              uint64_t Size = 0; // TODO: Not sure if we should track really this
+              Output.write(reinterpret_cast<char*>(&Size), sizeof(Size));
+            }
+          }
+
+          // 3.1. Export Fossilize database
+          {
+            auto MergedFozFilename = MergedFilename + ".foz";
+            const char* ExecveArgs[] = { "FEXOfflineCompiler", "to-foz", MergedFilename.c_str(), "--output", MergedFozFilename.c_str(), nullptr };
+            EmbedSubprocess("FEXOfflineCompiler", const_cast<char* const*>(&ExecveArgs[0]));
+          }
+
+          // 4. Trigger offline-compile for the main executable
+          // TODO: Use a BACKGROUND PROCESS for this
+          int Status = RunOfflineCompiler(MainFileId, MergedFilename.c_str());
+          if (Status != 0) {
+            fmt::println("ERROR: Cache generation failed with status {}", Status);
+          }
+        } while (false);
+
+        // 3.5. Delete all NEW code maps
+        for (auto& CodeMapFile : CodeMaps) {
+          std::filesystem::remove(CodeMapFile);
+          // TODO: Rename any pending (not finalized) code maps to PROGRAMNAME.0.bin so it will be found on the next run
+        }
+      }
+
+      // 4. Return FD for generated cache to client
+      auto CacheFD = open(fileid.c_str(), O_RDONLY);
+      FEXServerClient::FEXServerResultPacket Res {
+        .Header {
+          .Type = FEXServerClient::PacketType::TYPE_SUCCESS,
+        },
+      };
+
+      fasio::mutable_buffer Data = {.Data = std::as_writable_bytes(std::span(&Res, 1)), .FD = (CacheFD != -1 ? std::optional { &CacheFD } : std::nullopt)};
+      fasio::error ec;
+      write(Socket, Data, ec);
+      buffer += sizeof(FEXServerClient::FEXServerRequestPacket::Header);
+      break;
+    }
+
+    case FEXServerClient::PacketType::TYPE_QUERY_CODE_MAP: {
+      // TODO: Keep a map of clients that are already writing a code map.
+      //       No more than one instance of each application should write code
+      //       maps to avoid spamming the file system for high-frequency
+      //       invocations of the same program!
+
+      char Tmp[PATH_MAX];
+      int TmpLen = FEX::get_fdpath(inFD, Tmp);
+      assert(TmpLen != -1);
+      fmt::print("Requested code map FD for: {}\n", std::string_view(Tmp, TmpLen));
+      std::filesystem::path BinaryPath = std::string_view(Tmp, TmpLen);
+
+      FEXServerClient::FEXServerResultPacket Res {
+        .Header {
+          .Type = FEXServerClient::PacketType::TYPE_SUCCESS,
+        },
+      };
+
+      // Find first code map that doesn't exist yet
+      int Index = 0;
+      std::string Filename;
+      do {
+        Filename = fmt::format("/tmp/fexcode/{}.{}.bin", BinaryPath.filename().string(), Index++);
+      } while (std::filesystem::exists(Filename));
+      // TODO: Add ".pending" to filename and make TYPE_QUERY_CODE_CACHE rename it once it has no more users
+
+      std::filesystem::create_directories("/tmp/fexcode");
+      auto CodeDumpFD = open(Filename.c_str(), O_CREAT | O_CLOEXEC | O_WRONLY, 0644);
+
+      fasio::mutable_buffer Data = {.Data = std::as_writable_bytes(std::span(&Res, 1)), .FD = (CodeDumpFD != -1 ? std::optional { &CodeDumpFD } : std::nullopt)};
+      fasio::error ec;
+      write(Socket, Data, ec);
+      buffer += sizeof(FEXServerClient::FEXServerRequestPacket::Header);
+      close(CodeDumpFD);
+      break;
+    }
+
     // Invalid
     case FEXServerClient::PacketType::TYPE_ERROR:
     default:

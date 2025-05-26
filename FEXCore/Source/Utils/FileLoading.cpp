@@ -14,13 +14,7 @@ namespace FEXCore::FileLoading {
 
 #ifndef _WIN32
 template<typename T>
-static bool LoadFileImpl(T& Data, const fextl::string& Filepath, size_t FixedSize) {
-  int FD = open(Filepath.c_str(), O_RDONLY);
-
-  if (FD == -1) {
-    return false;
-  }
-
+static bool LoadFileImpl(T& Data, int FD, size_t FixedSize) {
   size_t FileSize {};
   if (FixedSize == 0) {
     struct stat buf;
@@ -66,6 +60,17 @@ static bool LoadFileImpl(T& Data, const fextl::string& Filepath, size_t FixedSiz
 
     LoadedFile = true;
   }
+  return LoadedFile;
+}
+
+template<typename T>
+static bool LoadFileImpl(T& Data, const fextl::string& Filepath, size_t FixedSize) {
+  int FD = open(Filepath.c_str(), O_RDONLY);
+  if (FD == -1) {
+    return false;
+  }
+
+  auto LoadedFile = LoadFileImpl(Data, FD, FixedSize);
   close(FD);
   return LoadedFile;
 }

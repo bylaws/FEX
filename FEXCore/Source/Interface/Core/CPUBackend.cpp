@@ -15,7 +15,8 @@
 namespace FEXCore {
 namespace CPU {
 
-  static constexpr size_t INITIAL_CODE_SIZE = 1024 * 1024 * 16;
+  // Made extra large to avoid resizing. TODO: Implement relocation of existing contents
+  static constexpr size_t INITIAL_CODE_SIZE = size_t { 1024 } * 1024 * 1024 * 10;
   // We don't want to move above 128MB atm because that means we will have to encode longer jumps
   static constexpr size_t MAX_CODE_SIZE = 1024 * 1024 * 128;
 
@@ -336,6 +337,7 @@ namespace CPU {
     fextl::shared_ptr<CodeBuffer> OldCodeBuffer;
     auto NewCodeBuffer = CodeBuffers.GetLatest();
     if (CurrentCodeBuffer != NewCodeBuffer) {
+      fextl::fmt::print(stderr, "Moving to new CodeBuffer generation in thread {}.{}\n", ::getpid(), ::gettid());
       RegisterForSignalHandler(CurrentCodeBuffer);
       return std::exchange(CurrentCodeBuffer, NewCodeBuffer);
     }

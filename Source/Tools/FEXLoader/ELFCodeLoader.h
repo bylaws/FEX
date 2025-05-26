@@ -36,14 +36,17 @@
 #define PAGE_ALIGN(x) (((x) + 4095) & ~(uintptr_t)(4095))
 
 class ELFCodeLoader final : public FEX::CodeLoader {
+public:
   ELFParser MainElf {};
   ELFParser InterpElf {};
 
   bool ElfValid {false};
   bool ExecutableStack {false};
+public:
   uintptr_t MainElfBase {};
   uintptr_t InterpeterElfBase {};
   uintptr_t MainElfEntrypoint {};
+private:
   uintptr_t Entrypoint {};
   uintptr_t BrkStart {};
   uintptr_t StackPointer {};
@@ -107,6 +110,7 @@ class ELFCodeLoader final : public FEX::CodeLoader {
     return rv;
   }
 
+public:
   std::optional<uintptr_t> LoadElfFile(ELFParser& Elf, uintptr_t* BrkBase, FEX::HLE::SyscallMmapInterface* const Handler, uint64_t LoadHint = 0) {
 
     uintptr_t LoadBase = 0;
@@ -351,6 +355,10 @@ public:
     uint64_t key;
     uint64_t val;
   };
+
+  int GetMainElfFD() const {
+    return MainElf.fd;
+  }
 
   bool MapMemory(FEX::HLE::SyscallMmapInterface* const Handler) {
     for (const auto& Header : MainElf.phdrs) {

@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "Common/AsyncNet.h"
 #include "Common/Config.h"
+#include "FDUtils.h"
 #include "Common/FEXServerClient.h"
 
 #include <FEXCore/Utils/CompilerDefs.h>
@@ -353,6 +354,70 @@ fextl::string RequestRootFSPath(int ServerSocket) {
 
 int RequestPIDFD(int ServerSocket) {
   return RequestPIDFDPacket(ServerSocket, PacketType::TYPE_GET_PID_FD);
+}
+
+int RequestCodeCache(int ServerSocket, int ProgramFD) {
+  fasio::tcp_socket Socket {ServerSocket};
+  FEXServerRequestPacket Req {
+    .Header {
+      .Type = PacketType::TYPE_QUERY_CODE_CACHE,
+    },
+  };
+
+  // Send request
+  fasio::error ec;
+  {
+    fasio::mutable_buffer WriteBuffer {std::as_writable_bytes(std::span {&Req, 1})};
+    WriteBuffer.FD = &ProgramFD;
+    write(Socket, WriteBuffer, ec);
+    if (ec != fasio::error::success) {
+      return -1;
+    }
+  }
+
+  // Wait for success response and log FD
+  FEXServerResultPacket Res {};
+  fasio::mutable_buffer ResBuffer {std::as_writable_bytes(std::span {&Res, 1})};
+  int NewFD = -1;
+  ResBuffer.FD = &NewFD;
+  read(Socket, ResBuffer, ec);
+  if (ec != fasio::error::success || Res.Header.Type != PacketType::TYPE_SUCCESS) {
+    return -1;
+  }
+
+  return NewFD;
+}
+
+int RequestCodeMapFD(int ServerSocket, int ProgramFD) {
+  fasio::tcp_socket Socket {ServerSocket};
+  FEXServerRequestPacket Req {
+    .Header {
+      .Type = PacketType::TYPE_QUERY_CODE_MAP,
+    },
+  };
+
+  // Send request
+  fasio::error ec;
+  {
+    fasio::mutable_buffer WriteBuffer {std::as_writable_bytes(std::span {&Req, 1})};
+    WriteBuffer.FD = &ProgramFD;
+    write(Socket, WriteBuffer, ec);
+    if (ec != fasio::error::success) {
+      return -1;
+    }
+  }
+
+  // Wait for success response and log FD
+  FEXServerResultPacket Res {};
+  fasio::mutable_buffer ResBuffer {std::as_writable_bytes(std::span {&Res, 1})};
+  int NewFD = -1;
+  ResBuffer.FD = &NewFD;
+  read(Socket, ResBuffer, ec);
+  if (ec != fasio::error::success || Res.Header.Type != PacketType::TYPE_SUCCESS) {
+    return -1;
+  }
+
+  return NewFD;
 }
 
 /**  @} */

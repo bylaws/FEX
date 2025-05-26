@@ -702,6 +702,7 @@ void OpDispatchBuilder::CondJUMPOp(OpcodeArgs) {
       TargetOffset = 0x1'0000'0000ULL + TargetOffset;
     } else if (TargetOffset >= 0 && (Target ^ InstRIP) & 0x1'0000'0000ULL) {
       // We are overflowing, wrap around
+      // TODO: Is this a hidden position dependence?
       TargetOffset = TargetOffset - 0x1'0000'0000ULL;
     }
     Target &= 0xFFFFFFFFU;
@@ -4341,6 +4342,8 @@ void OpDispatchBuilder::ResetWorkingList() {
   CurrentCodeBlock = nullptr;
   RegCache.Written = 0;
   RegCache.Cached = 0;
+
+  MMXState = MMXState_MMX;
 }
 
 void OpDispatchBuilder::UnhandledOp(OpcodeArgs) {

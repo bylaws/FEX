@@ -4,6 +4,7 @@
 #include <shared_mutex>
 
 #include <FEXCore/IR/IR.h>
+#include <FEXCore/fextl/string.h>
 
 namespace FEXCore::IR {
 struct AOTIRCacheEntry;
@@ -52,14 +53,13 @@ class SyscallHandler;
 class SourcecodeResolver;
 
 struct AOTIRCacheEntryLookupResult {
-  AOTIRCacheEntryLookupResult(FEXCore::IR::AOTIRCacheEntry* Entry, uintptr_t VAFileStart)
-    : Entry(Entry)
-    , VAFileStart(VAFileStart) {}
-
-  AOTIRCacheEntryLookupResult(AOTIRCacheEntryLookupResult&&) = default;
+  fextl::string GetCacheEntryId() const;
 
   FEXCore::IR::AOTIRCacheEntry* Entry;
+  // TODO: Rename. This actually denotes the offset in virtual memory from the first mapping
   uintptr_t VAFileStart;
+  uintptr_t VMABegin;
+  uintptr_t VMAEnd;
 
   friend class SyscallHandler;
 };
@@ -83,6 +83,7 @@ public:
   virtual void UnmarkOvercommitRange(uint64_t Start, uint64_t Length) {}
   virtual ExecutableRangeInfo QueryGuestExecutableRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Address) = 0;
   virtual AOTIRCacheEntryLookupResult LookupAOTIRCacheEntry(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestAddr) = 0;
+  virtual void ForEachVMAMapping(FEXCore::Core::InternalThreadState*, std::function<void(uint64_t)>) = 0;
 
   virtual void PreCompile() {}
 

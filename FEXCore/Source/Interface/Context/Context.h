@@ -147,6 +147,7 @@ public:
   FEXCore::CPUID::FunctionResults RunCPUIDFunctionName(uint32_t Function, uint32_t Leaf, uint32_t CPU) override;
 
   FEXCore::IR::AOTIRCacheEntry* LoadAOTIRCacheEntry(const fextl::string& Name) override;
+  void FetchAOTIRCacheEntry(FEXCore::Core::InternalThreadState* Thread, uintptr_t GuestRIP) override;
   void UnloadAOTIRCacheEntry(FEXCore::IR::AOTIRCacheEntry* Entry) override;
 
   void SetAOTIRLoader(AOTIRLoaderCBFn CacheReader) override {
@@ -159,9 +160,9 @@ public:
     IRCaptureCache.SetAOTIRRenamer(std::move(CacheRenamer));
   }
 
-  void FinalizeAOTIRCache() override {
-    IRCaptureCache.FinalizeAOTIRCache();
-  }
+  void FinalizeAOTIRCache(FEXCore::Core::InternalThreadState&, int fd, uint64_t BaseGuestEntry) override; /* {
+     IRCaptureCache.FinalizeAOTIRCache();
+   }*/
   void WriteFilesWithCode(AOTIRCodeFileWriterFn Writer) override {
     IRCaptureCache.WriteFilesWithCode(Writer);
   }

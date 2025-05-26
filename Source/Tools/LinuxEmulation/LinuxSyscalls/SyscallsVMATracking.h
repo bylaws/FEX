@@ -7,6 +7,9 @@
 #include <FEXCore/fextl/map.h>
 #include <FEXCore/Utils/SignalScopeGuards.h>
 
+// TODO: Drop
+#include <elf.h>
+
 namespace FEXCore::IR {
 struct AOTIRCacheEntry;
 }
@@ -39,9 +42,13 @@ struct MappedResource {
 
   FEXCore::IR::AOTIRCacheEntry* AOTIRCacheEntry;
   // Pointer to lowest memory range this file is mapped to
+  // TODO: Change to mapping that has offset 0?
   VMAEntry* FirstVMA;
-  uint64_t Length; // 0 if not fixed size
-  ContainerType::iterator Iterator;
+  uint64_t Length;                  // 0 if not fixed size
+  ContainerType::iterator Iterator; // TODO: Is this still needed?
+
+  // TODO: Be frontend-agnostic
+  fextl::vector<Elf64_Phdr> ProgramHeaders;
 };
 
 union VMAProt {
@@ -66,7 +73,7 @@ struct VMAEntry {
   MappedResource* Resource;
 
   // these are for intrusive linked list tracking, starting from Resource->FirstVMA and ordered by address
-  VMAEntry* ResourcePrevVMA;
+  VMAEntry* ResourcePrevVMA; // TODO: Not really needed...
   VMAEntry* ResourceNextVMA;
 
   uint64_t Base;

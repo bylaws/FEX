@@ -17,6 +17,10 @@ $end_info$
 
 #include <cstdint>
 
+namespace FEXCore::CPU {
+union Relocation;
+}
+
 namespace FEXCore {
 
 namespace IR {
@@ -40,6 +44,7 @@ namespace CPU {
   struct CodeBuffer {
     uint8_t* Ptr;
     size_t Size;
+    size_t UsedSize = 0;
 
     fextl::unique_ptr<GuestToHostMap> LookupCache;
 
@@ -166,9 +171,14 @@ namespace CPU {
      * @return An executable function pointer relocated from the cache object
      */
     [[nodiscard]]
-    virtual void* RelocateJITObjectCode(uint64_t /* Entry */, const CodeSerialize::CodeObjectFileSection* /* SerializationData */) {
-      return nullptr;
-    }
+    virtual void*
+    RelocateJITObjectCode(uint64_t Entry, std::span<std::byte> HostCode, std::span<const Relocation> Relocations, bool ForStorage) = 0;
+
+    // TODO: Make pure virtual?
+    virtual const fextl::vector<FEXCore::CPU::Relocation>& GetRelocations() const {
+      ERROR_AND_DIE_FMT("Not implemented");
+      // return {};
+    };
 
     virtual void ClearCache() {}
 
@@ -183,6 +193,9 @@ namespace CPU {
     // The returned reference should be kept alive carefully to avoid early deletion of resources.
     [[nodiscard]]
     fextl::shared_ptr<CodeBuffer> CheckCodeBufferUpdate();
+
+    // TODO: Revisit this interface. For now, it just moves the cursor by the given number of bytes
+    virtual void ImportCode(uint64_t NumBytes) {};
 
   protected:
     // Max spill slot size in bytes. We need at most 32 bytes

@@ -169,6 +169,25 @@ void VMATracking::TrackVMARange(FEXCore::Context::Context* CTX, MappedResource* 
                                 uintptr_t Length, VMAFlags Flags, VMAProt Prot) {
   Mutex.check_lock_owned_by_self_as_write();
 
+  // Detect Wine special case
+  // TODO: For Wine-on-Arm, check Wine's update_arm64ec_ranges in virtual.c
+  if (MappedResource && !MappedResource->FirstVMA) {
+    auto WineSpecialCase = VMAs.find(Base); // TODO: In principle, it could be connected to a preceding anonymous region...
+    if (WineSpecialCase != VMAs.end() && !WineSpecialCase->second.Resource) {
+      LogMan::Msg::EFmt("Detected wine special case at addr {:#x}-{:#x}", Base, Base + WineSpecialCase->second.Length);
+      WineSpecialCase->second.Resource = MappedResource;
+      MappedResource->FirstVMA = &WineSpecialCase->second;
+    }
+  }
+  if (!MappedResource) {
+    auto WineSpecialCase = FindVMAEntry(Base);
+    // TODO: Refine these conditions
+    if (WineSpecialCase != VMAs.end() && WineSpecialCase->second.Resource && Offset == 0) {
+      MappedResource = WineSpecialCase->second.Resource;
+      // Offset = TODO?;
+    }
+  }
+
   DeleteVMARange(CTX, Base, Length, MappedResource);
 
   auto PrevResVMA = MappedResource ? MappedResource->FirstVMA : nullptr;

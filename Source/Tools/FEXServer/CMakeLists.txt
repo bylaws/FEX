@@ -12,7 +12,8 @@ target_include_directories(${NAME} PRIVATE
   ${CMAKE_BINARY_DIR}/generated
   ${CMAKE_SOURCE_DIR}/Source/)
 
-target_link_libraries(${NAME} PRIVATE FEXCore Common CommonTools JemallocDummy ${PTHREAD_LIB})
+# LinuxEmulation needed for ELF parsing support... (ELFCodeLoader.h)
+target_link_libraries(${NAME} PRIVATE FEXCore Common CommonTools LinuxEmulation JemallocDummy ${PTHREAD_LIB})
 
 if (CMAKE_BUILD_TYPE MATCHES "RELEASE")
   target_link_options(${NAME}
