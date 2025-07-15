@@ -99,6 +99,7 @@ private:
 
   uint64_t ExecutableRangeBase {};
   uint64_t ExecutableRangeEnd {};
+  bool ExecutableRangeWritable {};
   bool HitNonExecutableRange {};
 
   const uint8_t* InstStream {};

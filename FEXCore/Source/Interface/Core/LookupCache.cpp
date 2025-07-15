@@ -93,6 +93,7 @@ void GuestToHostMap::ClearCache(const LockToken&) {
   BlockLinks = BlockLinks_pma->new_object<BlockLinksMapType>();
   // All code is gone, clear the block list
   BlockList.clear();
+  BlockHeaderAddresses.clear();
 }
 
 } // namespace FEXCore

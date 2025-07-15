@@ -112,68 +112,67 @@ ContextImpl::~ContextImpl() {
   }
 }
 
-struct GetFrameBlockInfoResult {
-  const CPU::CPUBackend::JITCodeHeader* InlineHeader;
+struct GetBlockInfoResult {
+  uint64_t BlockBegin;
   const CPU::CPUBackend::JITCodeTail* InlineTail;
 };
-static GetFrameBlockInfoResult GetFrameBlockInfo(FEXCore::Core::CpuStateFrame* Frame) {
-  const uint64_t BlockBegin = Frame->State.InlineJITBlockHeader;
+static GetBlockInfoResult GetBlockInfo(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC) {
+  uint64_t BlockBegin = Thread->LookupCache->FindPrecedingBlockHeaderAddress(HostPC);
+  if (!BlockBegin) {
+    return {0, nullptr};
+  }
   auto InlineHeader = reinterpret_cast<const CPU::CPUBackend::JITCodeHeader*>(BlockBegin);
-
-  if (InlineHeader) {
-    auto InlineTail = reinterpret_cast<const CPU::CPUBackend::JITCodeTail*>(Frame->State.InlineJITBlockHeader + InlineHeader->OffsetToBlockTail);
-    return {InlineHeader, InlineTail};
+  auto InlineTail = reinterpret_cast<const CPU::CPUBackend::JITCodeTail*>(BlockBegin + InlineHeader->OffsetToBlockTail);
+  if (HostPC - BlockBegin >= InlineTail->Size) {
+    return {0, nullptr};
   }
 
-  return {InlineHeader, nullptr};
+  return {BlockBegin, InlineTail};
 }
 
-bool ContextImpl::IsAddressInCurrentBlock(FEXCore::Core::InternalThreadState* Thread, uint64_t Address, uint64_t Size) {
-  auto [_, InlineTail] = GetFrameBlockInfo(Thread->CurrentFrame);
+bool ContextImpl::IsAddressInBlock(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC, uint64_t Address, uint64_t Size) {
+  auto [_, InlineTail] = GetBlockInfo(Thread, HostPC);
   return InlineTail && (Address + Size > InlineTail->RIP && Address < InlineTail->RIP + InlineTail->GuestSize);
 }
 
-bool ContextImpl::IsCurrentBlockSingleInst(FEXCore::Core::InternalThreadState* Thread) {
-  auto [_, InlineTail] = GetFrameBlockInfo(Thread->CurrentFrame);
+bool ContextImpl::IsBlockSingleInst(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC) {
+  auto [_, InlineTail] = GetBlockInfo(Thread, HostPC);
   return InlineTail && InlineTail->SingleInst;
+}
+
+uint64_t ContextImpl::GetGuestBlockEntry(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC) {
+  auto [_, InlineTail] = GetBlockInfo(Thread, HostPC);
+  return InlineTail ? InlineTail->RIP : 0;
 }
 
 uint64_t ContextImpl::RestoreRIPFromHostPC(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC) {
   const auto Frame = Thread->CurrentFrame;
-  const uint64_t BlockBegin = Frame->State.InlineJITBlockHeader;
-  auto [InlineHeader, InlineTail] = GetFrameBlockInfo(Thread->CurrentFrame);
+  auto [BlockBegin, InlineTail] = GetBlockInfo(Thread, HostPC);
 
-  if (InlineHeader) {
-    // Check if the host PC is currently within a code block.
-    // If it is then RIP can be reconstructed from the beginning of the code block.
-    // This is currently as close as FEX can get RIP reconstructions.
-    if (HostPC >= reinterpret_cast<uint64_t>(BlockBegin) && HostPC < reinterpret_cast<uint64_t>(BlockBegin + InlineTail->Size)) {
-
-      auto RIPEntry =
-        reinterpret_cast<const uint8_t*>(Frame->State.InlineJITBlockHeader + InlineHeader->OffsetToBlockTail + InlineTail->OffsetToRIPEntries);
-
-      // Reconstruct RIP from JIT entries for this block.
-      uint64_t StartingHostPC = BlockBegin;
-      uint64_t StartingGuestRIP = InlineTail->RIP;
-
-      for (uint32_t i = 0; i < InlineTail->NumberOfRIPEntries; ++i) {
-        auto Offset = FEXCore::Utils::vl64pair::Decode(RIPEntry);
-        RIPEntry += Offset.Size;
-        if (HostPC >= (StartingHostPC + Offset.IntegerARMPC)) {
-          // We are beyond this entry, keep going forward.
-          StartingHostPC += Offset.IntegerARMPC;
-          StartingGuestRIP += Offset.IntegerX86RIP;
-        } else {
-          // Passed where the Host PC is at. Break now.
-          break;
-        }
-      }
-      return StartingGuestRIP;
-    }
+  if (!InlineTail) {
+    // Fallback to what is stored in the RIP currently.
+    return Frame->State.rip;
   }
 
-  // Fallback to what is stored in the RIP currently.
-  return Frame->State.rip;
+  auto RIPEntry = reinterpret_cast<const uint8_t*>(reinterpret_cast<const uint8_t*>(InlineTail) + InlineTail->OffsetToRIPEntries);
+
+  // Reconstruct RIP from JIT entries for this block.
+  uint64_t StartingHostPC = BlockBegin;
+  uint64_t StartingGuestRIP = InlineTail->RIP;
+
+  for (uint32_t i = 0; i < InlineTail->NumberOfRIPEntries; ++i) {
+    auto Offset = FEXCore::Utils::vl64pair::Decode(RIPEntry);
+    RIPEntry += Offset.Size;
+    if (HostPC >= (StartingHostPC + Offset.IntegerARMPC)) {
+      // We are beyond this entry, keep going forward.
+      StartingHostPC += Offset.IntegerARMPC;
+      StartingGuestRIP += Offset.IntegerX86RIP;
+    } else {
+      // Passed where the Host PC is at. Break now.
+      break;
+    }
+  }
+  return StartingGuestRIP;
 }
 
 uint32_t ContextImpl::ReconstructCompactedEFLAGS(FEXCore::Core::InternalThreadState* Thread, bool WasInJIT, const uint64_t* HostGPRs,
@@ -881,6 +880,7 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
   for (auto [GuestAddr, HostAddr] : CompiledCode.EntryPoints) {
     Thread->LookupCache->AddBlockMapping(GuestAddr, HostAddr);
   }
+  Thread->LookupCache->AddBlockHeaderAddress(reinterpret_cast<uint64_t>(CompiledCode.BlockBegin));
 
   return (uintptr_t)CodePtr;
 }
@@ -902,6 +902,7 @@ uintptr_t ContextImpl::CompileSingleStep(FEXCore::Core::CpuStateFrame* Frame, ui
 
   // Clear any relocations that might have been generated
   Thread->CPUBackend->ClearRelocations();
+  Thread->LookupCache->AddBlockHeaderAddress(reinterpret_cast<uint64_t>(CompiledCode.BlockBegin));
 
   return (uintptr_t)CodePtr;
 }
@@ -1031,6 +1032,40 @@ void ContextImpl::RemoveForceTSOInformation(uint64_t Address, uint64_t Size) {
   ForceTSOInstructions.erase(ForceTSOInstructions.lower_bound(Address), ForceTSOInstructions.upper_bound(Address + Size));
 }
 
+void ContextImpl::InjectCustomMonoBackpatcher(uint64_t BlockEntry) {
+  LogMan::Throw::AFmt(CodeInvalidationMutex.try_lock() == false, "CodeInvalidationMutex needs to be unique_locked here");
+
+  AddCustomIREntrypoint(BlockEntry, [this](uintptr_t Entrypoint, FEXCore::IR::IREmitter* emit) {
+    auto IRHeader = emit->_IRHeader(emit->Invalid(), Entrypoint, 0, 0, 0, 0);
+    auto Block = emit->CreateCodeNode(true, 0);
+    IRHeader.first->Blocks = emit->WrapNode(Block);
+    emit->SetCurrentCodeBlock(Block);
+
+    const auto GPRSize = GetGPROpSize();
+
+    if (GPRSize == IR::OpSize::i64Bit) {
+      // Load the 3 arguments assuming x64 windows abi: guint8 *method_start, guint8 *orig_code, guint8 *addr
+      IR::Ref MethodStart = emit->_LoadRegister(X86State::REG_RCX, IR::GPRClass, GPRSize);
+      IR::Ref OrigCode = emit->_LoadRegister(X86State::REG_RDX, IR::GPRClass, GPRSize);
+      IR::Ref Addr = emit->_LoadRegister(X86State::REG_R8, IR::GPRClass, GPRSize);
+
+      emit->_MonoBackpatcher(GPRSize, MethodStart, OrigCode, Addr);
+
+      // Return
+      IR::Ref SP = emit->_RMWHandle(emit->_LoadRegister(X86State::REG_RSP, IR::GPRClass, GPRSize));
+      IR::Ref NewRIP = emit->_AllocateGPR(false);
+      emit->_Pop(GPRSize, SP, NewRIP);
+
+      IR::Ref R = emit->_StoreRegister(SP, GPRSize);
+      R->Reg = IR::PhysicalRegister(IR::GPRFixedClass, X86State::REG_RSP).Raw;
+      emit->_ExitFunction(IR::OpSize::i64Bit, NewRIP, IR::BranchHint::Return, emit->Invalid(), emit->Invalid());
+
+    } else {
+      // Pop arguments from stack using stdcall abi, call mono backpatcher
+    }
+  }, nullptr, nullptr);
+}
+
 void ContextImpl::RemoveCustomIREntrypoint(uintptr_t Entrypoint) {
   LOGMAN_THROW_A_FMT(Config.Is64BitMode || !(Entrypoint >> 32), "64-bit Entrypoint in 32-bit mode {:x}", Entrypoint);
 
@@ -1040,6 +1075,36 @@ void ContextImpl::RemoveCustomIREntrypoint(uintptr_t Entrypoint) {
   CustomIRHandlers.erase(Entrypoint);
 
   HasCustomIRHandlers = !CustomIRHandlers.empty();
+}
+
+void ContextImpl::MonoBackpatcher(FEXCore::Core::CpuStateFrame* Frame, uint8_t* MethodStart, uint8_t* OrigCode, uint8_t* Addr) {
+  auto Thread = Frame->Thread;
+  auto lk = GuardSignalDeferringSection(static_cast<ContextImpl*>(Thread->CTX)->CodeInvalidationMutex, Thread);
+
+  uint8_t buf[16] {};
+  uint8_t* Code = buf + 14;
+  auto Offset = std::min(OrigCode - MethodStart, 14LL);
+  memcpy(Code - Offset, OrigCode - Offset, Offset + sizeof(buf) - 14);
+
+  if (((Code[-13] == 0x49) && (Code[-12] == 0xbb)) || (Code[-5] == 0xe8)) {
+    if (Code[-5] != 0xe8) {
+      auto ImmPtr = reinterpret_cast<uint8_t**>(OrigCode - 11);
+      *ImmPtr = Addr;
+    } else {
+      bool Disp32Bit = ((Addr - OrigCode) < (1 << 30)) && ((Addr - OrigCode) > -(1 << 30));
+      if ((reinterpret_cast<uint64_t>(Addr) >> 32) != 0 && !Disp32Bit) {
+        LogMan::Msg::IFmt("Unhandled");
+      } else {
+        auto ImmPtr = OrigCode - 4;
+        *ImmPtr = Addr - OrigCode;
+      }
+    }
+
+    InvalidateGuestThreadCodeRange(Thread, reinterpret_cast<uint64_t>(OrigCode) - 14, 16);
+  } else if ((Code[-7] == 0x41) && (Code[-6] == 0xff) && (Code[-5] == 0x15)) {
+    auto GotEntry = reinterpret_cast<uint8_t**>(OrigCode + *reinterpret_cast<uint32_t*>(OrigCode - 4));
+    *GotEntry = Addr;
+  }
 }
 
 IR::AOTIRCacheEntry* ContextImpl::LoadAOTIRCacheEntry(const fextl::string& filename) {

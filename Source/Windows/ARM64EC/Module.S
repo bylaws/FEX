@@ -57,9 +57,9 @@ BeginSimulation:
 .global ExitFunctionEC
 ExitFunctionEC:
   // Clear any the AFP NEP and AH bits in FPCR as native code won't expect their behaviour.
-  mrs x17, fpcr
-  and x17, x17, #~6 // NEP + AH
-  msr fpcr, x17
+//  mrs x17, fpcr
+//  and x17, x17, #~6 // NEP + AH
+//  msr fpcr, x17
   ldr x17, [x18, #0x1788] // TEB->ChpeV2CpuAreaInfo
   strb wzr, [x17, #0x0] // ChpeV2CpuAreaInfo->InSimulation
 

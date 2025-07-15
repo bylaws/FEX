@@ -83,6 +83,7 @@ bool Decoder::CheckRangeExecutable(uint64_t Address, uint64_t Size) {
     auto RangeInfo = CTX->SyscallHandler->QueryGuestExecutableRange(Thread, Address);
     ExecutableRangeBase = RangeInfo.Base;
     ExecutableRangeEnd = RangeInfo.Base + RangeInfo.Size;
+    ExecutableRangeWritable = RangeInfo.Writable;
 
     if (RangeInfo.Size == 0) {
       return false;
@@ -1033,11 +1034,15 @@ void Decoder::BranchTargetInMultiblockRange() {
   bool Conditional = true;
   const auto InstEnd = DecodeInst->PC + DecodeInst->InstSize;
 
+
   if (DecodeInst->TableInfo->Flags & FEXCore::X86Tables::InstFlags::FLAGS_CALL) {
-    AddBranchTarget(InstEnd);
-    BlockEntryPoints.emplace(InstEnd);
+    if (!ExecutableRangeWritable) {
+      AddBranchTarget(InstEnd);
+      BlockEntryPoints.emplace(InstEnd);
+    }
     return;
   }
+
 
   // Calls are handled above
   switch (DecodeInst->OP) {
@@ -1068,7 +1073,7 @@ void Decoder::BranchTargetInMultiblockRange() {
   // If the target RIP is x86 code within the symbol ranges then we are golden
   // Forbid cross-page branches to both avoid massive (range-wise) code blocks in highly fragmented code and trying to decode unmapped branch targets
   bool ValidMultiblockMember =
-    TargetRIP >= SymbolMinAddress && TargetRIP < std::min(FEXCore::AlignUp(InstEnd, FEXCore::Utils::FEX_PAGE_SIZE), SymbolMaxAddress);
+    TargetRIP >= SymbolMinAddress && TargetRIP < std::min(EntryPoint + FEXCore::Utils::FEX_PAGE_SIZE * 16, SymbolMaxAddress);
 
 #ifdef _M_ARM_64EC
   ValidMultiblockMember = ValidMultiblockMember && !RtlIsEcCode(TargetRIP);

@@ -32,6 +32,7 @@ public:
   void ReprotectRWXIntervals(uint64_t Address, uint64_t Size);
   bool HandleRWXAccessViolation(uint64_t FaultAddress);
   FEXCore::HLE::ExecutableRangeInfo QueryExecutableRange(uint64_t Address);
+  void DisableSMCDetection();
 
 private:
   FEXCore::IntervalList<uint64_t> XIntervals;
@@ -39,5 +40,6 @@ private:
   std::shared_mutex IntervalsLock;
   FEXCore::Context::Context& CTX;
   const std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*>& Threads;
+  bool SMCDetectionDisabled = false;
 };
 } // namespace FEX::Windows

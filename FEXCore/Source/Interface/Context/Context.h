@@ -88,8 +88,9 @@ public:
 
   void HandleCallback(FEXCore::Core::InternalThreadState* Thread, uint64_t RIP) override;
 
-  bool IsAddressInCurrentBlock(FEXCore::Core::InternalThreadState* Thread, uint64_t Address, uint64_t Size) override;
-  bool IsCurrentBlockSingleInst(FEXCore::Core::InternalThreadState* Thread) override;
+  bool IsAddressInBlock(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC, uint64_t Address, uint64_t Size) override;
+  bool IsBlockSingleInst(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC) override;
+  uint64_t GetGuestBlockEntry(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC) override;
 
   uint64_t RestoreRIPFromHostPC(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC) override;
   uint32_t ReconstructCompactedEFLAGS(FEXCore::Core::InternalThreadState* Thread, bool WasInJIT, const uint64_t* HostGPRs, uint64_t PSTATE) override;
@@ -188,6 +189,8 @@ public:
 
   void RemoveForceTSOInformation(uint64_t Address, uint64_t Size) override;
 
+  void InjectCustomMonoBackpatcher(uint64_t BlockEntry) override;
+
 public:
   friend class FEXCore::HLE::SyscallHandler;
 #ifdef JIT_ARM64
@@ -271,6 +274,8 @@ public:
     //       invalidated CodeBuffer memory range currently.
     ThreadRemoveCodeEntry(Thread, GuestRIP);
   }
+
+  static void MonoBackpatcher(FEXCore::Core::CpuStateFrame* Frame, uint8_t* MethodStart, uint8_t* OrigCode, uint8_t* Addr);
 
   void RemoveCustomIREntrypoint(uintptr_t Entrypoint);
 

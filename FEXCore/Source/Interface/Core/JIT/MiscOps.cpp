@@ -5,6 +5,7 @@ tags: backend|arm64
 $end_info$
 */
 
+#include "Interface/Core/ArchHelpers/Arm64Emitter.h"
 #ifndef _WIN32
 #include <syscall.h>
 #endif
@@ -264,6 +265,46 @@ DEF_OP(RDRAND) {
 
 DEF_OP(Yield) {
   yield();
+}
+
+DEF_OP(MonoBackpatcher) {
+  auto Op = IROp->C<IR::IROp_MonoBackpatcher>();
+
+  mov(ARMEmitter::Size::i64Bit, TMP1, GetReg(Op->MethodStart));
+  mov(ARMEmitter::Size::i64Bit, TMP2, GetReg(Op->OrigCode));
+  mov(ARMEmitter::Size::i64Bit, TMP3, GetReg(Op->Addr));
+
+  PushDynamicRegs(TMP4);
+  SpillStaticRegs(TMP4);
+
+  mov(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r0, STATE.R());
+
+  if (!TMP_ABIARGS) {
+    mov(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r1, TMP1);
+    mov(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r2, TMP2);
+    mov(ARMEmitter::Size::i64Bit, ARMEmitter::Reg::r3, TMP3);
+  }
+
+#ifdef _M_ARM_64EC
+  ldr(TMP2, ARMEmitter::XReg::x18, TEB_CPU_AREA_OFFSET);
+  LoadConstant(ARMEmitter::Size::i32Bit, TMP1, 1);
+  strb(TMP1.W(), TMP2, CPU_AREA_IN_SYSCALL_CALLBACK_OFFSET);
+#endif
+
+  ldr(ARMEmitter::XReg::x4, STATE, offsetof(FEXCore::Core::CpuStateFrame, Pointers.Common.MonoBackpatcher));
+  if (!CTX->Config.DisableVixlIndirectCalls) [[unlikely]] {
+    GenerateIndirectRuntimeCall<void, void*, void*, void*, void*>(ARMEmitter::Reg::r4);
+  } else {
+    blr(ARMEmitter::Reg::r4);
+  }
+
+#ifdef _M_ARM_64EC
+  ldr(TMP2, ARMEmitter::XReg::x18, TEB_CPU_AREA_OFFSET);
+  strb(ARMEmitter::WReg::zr, TMP2, CPU_AREA_IN_SYSCALL_CALLBACK_OFFSET);
+#endif
+
+  FillStaticRegs();
+  PopDynamicRegs();
 }
 
 } // namespace FEXCore::CPU

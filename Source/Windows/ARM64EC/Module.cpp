@@ -312,6 +312,25 @@ void HandleImageMap(uint64_t Address) {
   }
   InvalidationTracker->HandleImageMap(Address);
 }
+
+
+std::atomic<uint64_t> PendingMonoBackpatcherAddress;
+void TryInjectCustomMonoBackpatcher() {
+  if (PendingMonoBackpatcherAddress.load(std::memory_order_relaxed)) {
+    uint64_t BlockEntry = PendingMonoBackpatcherAddress.exchange(0, std::memory_order_relaxed);
+    if (BlockEntry) {
+      LogMan::Msg::IFmt("Injecting custom mono backpatcher for block at {:x}", BlockEntry);
+
+      std::scoped_lock ThreadLock(ThreadCreationMutex);
+      InvalidationTracker->DisableSMCDetection();
+      {
+        std::scoped_lock CodeLock(CTX->GetCodeInvalidationMutex());
+        CTX->InjectCustomMonoBackpatcher(BlockEntry);
+      }
+      InvalidationTracker->InvalidateAlignedInterval(BlockEntry, 0x1000, false);
+    }
+  }
+}
 } // namespace
 
 namespace Exception {
@@ -416,7 +435,10 @@ static void ReconstructThreadState(FEXCore::Core::InternalThreadState* Thread, A
   const auto& Config = SignalDelegator->GetConfig();
   auto& State = Thread->CurrentFrame->State;
 
-  State.rip = CTX->RestoreRIPFromHostPC(Thread, Context.Pc);
+  {
+    std::scoped_lock Lock(CTX->GetCodeInvalidationMutex());
+    State.rip = CTX->RestoreRIPFromHostPC(Thread, Context.Pc);
+  }
 
   // Spill all SRA GPRs
   for (size_t i = 0; i < Config.SRAGPRCount; i++) {
@@ -584,6 +606,7 @@ public:
   }
 
   void PreCompile() override {
+    TryInjectCustomMonoBackpatcher();
     ProcessPendingCrossProcessEmulatorWork();
   }
 };
@@ -704,9 +727,21 @@ bool ResetToConsistentStateImpl(EXCEPTION_RECORD* Exception, CONTEXT* GuestConte
     std::scoped_lock Lock(ThreadCreationMutex);
     if (InvalidationTracker && InvalidationTracker->HandleRWXAccessViolation(FaultAddress)) {
       FEXCORE_PROFILE_INSTANT_INCREMENT(Thread, AccumulatedSMCCount, 1);
-      if (CTX->IsAddressInCodeBuffer(Thread, NativeContext->Pc) && !CTX->IsCurrentBlockSingleInst(CPUArea.ThreadState()) &&
-          CTX->IsAddressInCurrentBlock(Thread, FaultAddress, 8)) {
-        // If we are not patching ourself (single inst block case) and patching the current block, this is inline SMC. Reconstruct the current context (before the SMC write) then single step the write to reduce it to regular SMC.
+      bool InlineSMC = false;
+      if (CTX->IsAddressInCodeBuffer(Thread, NativeContext->Pc)) {
+        std::scoped_lock Lock(CTX->GetCodeInvalidationMutex());
+        // If we are not patching ourself (single inst block case) and patching the current block, this is inline SMC
+        InlineSMC = !CTX->IsBlockSingleInst(CPUArea.ThreadState(), NativeContext->Pc) &&
+                    CTX->IsAddressInBlock(Thread, NativeContext->Pc, FaultAddress, 8);
+ /*       uint64_t RIP = CTX->RestoreRIPFromHostPC(Thread, NativeContext->Pc);
+        if (*reinterpret_cast<uint8_t*>(RIP) == 0x87 || *reinterpret_cast<uint8_t*>(RIP + 1) == 0x87) {
+          PendingMonoBackpatcherAddress.store(CTX->GetGuestBlockEntry(Thread, NativeContext->Pc), std::memory_order_relaxed);
+          LogMan::Msg::IFmt("Pending mono backpatcher for block at {:x}", PendingMonoBackpatcherAddress.load(std::memory_order_relaxed));
+        }*/
+      }
+
+      if (InlineSMC) {
+        // Reconstruct the current context (before the SMC write) then single step the write to reduce it to regular SMC.
         Exception::ReconstructThreadState(Thread, *NativeContext);
         LogMan::Msg::DFmt("Handled inline self-modifying code: pc: {:X} rip: {:X} fault: {:X}", NativeContext->Pc,
                           Thread->CurrentFrame->State.rip, FaultAddress);

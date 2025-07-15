@@ -55,6 +55,7 @@ struct GuestToHostMap {
   BlockLinksMapType* BlockLinks;
 
   fextl::robin_map<uint64_t, uint64_t> BlockList;
+  fextl::set<uint64_t> BlockHeaderAddresses;
 
   GuestToHostMap();
 
@@ -66,6 +67,18 @@ struct GuestToHostMap {
     //       may already contain the block address. Since is comparatively rare, we'll just leak
     //       one of the two blocks in this case.
     BlockList[Address] = (uintptr_t)HostCode;
+  }
+
+  void AddBlockHeaderAddress(uint64_t Address, const LockToken&) {
+    BlockHeaderAddresses.insert(Address);
+  }
+
+  uint64_t FindPrecedingBlockHeaderAddress(uint64_t Address, const LockToken&) {
+    auto it = BlockHeaderAddresses.upper_bound(Address);
+    if (it == BlockHeaderAddresses.begin()) {
+      return 0;
+    }
+    return *std::prev(it);
   }
 
   std::optional<uintptr_t> FindBlock(uint64_t Address, const LockToken&) {
@@ -184,6 +197,17 @@ public:
     auto& L1Entry = reinterpret_cast<LookupCacheEntry*>(L1Pointer)[Address & L1_ENTRIES_MASK];
     L1Entry.GuestCode = Address;
     L1Entry.HostCode = (uintptr_t)HostCode;
+  }
+
+  void AddBlockHeaderAddress(uint64_t Address) {
+    auto lk = Shared->AcquireLock();
+
+    Shared->AddBlockHeaderAddress(Address, lk);
+  }
+
+  uint64_t FindPrecedingBlockHeaderAddress(uint64_t Address) {
+    auto lk = Shared->AcquireLock();
+    return Shared->FindPrecedingBlockHeaderAddress(Address, lk);
   }
 
   // NOTE: It's the caller's responsibility to call Erase() for all other

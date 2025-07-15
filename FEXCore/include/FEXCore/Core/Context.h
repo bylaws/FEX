@@ -105,8 +105,11 @@ public:
 
   FEX_DEFAULT_VISIBILITY virtual void HandleCallback(FEXCore::Core::InternalThreadState* Thread, uint64_t RIP) = 0;
 
-  FEX_DEFAULT_VISIBILITY virtual bool IsAddressInCurrentBlock(FEXCore::Core::InternalThreadState* Thread, uint64_t Address, uint64_t Size) = 0;
-  FEX_DEFAULT_VISIBILITY virtual bool IsCurrentBlockSingleInst(FEXCore::Core::InternalThreadState* Thread) = 0;
+  FEX_DEFAULT_VISIBILITY virtual bool
+  IsAddressInBlock(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC, uint64_t Address, uint64_t Size) = 0;
+  FEX_DEFAULT_VISIBILITY virtual bool IsBlockSingleInst(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC) = 0;
+
+  FEX_DEFAULT_VISIBILITY virtual uint64_t GetGuestBlockEntry(FEXCore::Core::InternalThreadState* Thread, uint64_t HostPC) = 0;
 
   ///< State reconstruction helpers
   ///< Reconstructs the guest RIP from the passed in thread context and related Host PC.
@@ -223,6 +226,8 @@ public:
   FEX_DEFAULT_VISIBILITY virtual void AddForceTSOInformation(const IntervalList<uint64_t>& ValidRanges, fextl::set<uint64_t>&& Instructions) = 0;
 
   FEX_DEFAULT_VISIBILITY virtual void RemoveForceTSOInformation(uint64_t Address, uint64_t Size) = 0;
+
+  FEX_DEFAULT_VISIBILITY virtual void InjectCustomMonoBackpatcher(uint64_t BlockEntry) = 0;
 private:
 };
 

@@ -285,6 +285,10 @@
         "HasSideEffects": true,
         "Desc": ["This is a hint instruction that the CPU is likely to do a spin so it might want to pause to help out SMP",
                  "Can be implemented as a NOP if necessary"]
+      },
+      "MonoBackpatcher OpSize:#RegisterSize, GPR:$MethodStart, GPR:$OrigCode, GPR:$Addr": {
+        "HasSideEffects": true,
+        "Desc": [ "todo" ]
       }
     },
     "Branch": {

@@ -536,11 +536,13 @@ void OpDispatchBuilder::CALLOp(OpcodeArgs) {
     // Store the RIP
     ExitFunction(NewRIP, BranchHint::Call, ConstantPC, [&]() {
       auto CallReturnJumpTarget = JumpTargets.find(NextRIP);
+
       if (CallReturnJumpTarget != JumpTargets.end() && CallReturnJumpTarget->second.IsEntryPoint) {
         return CallReturnJumpTarget->second.BlockEntry;
       }
       return InvalidNode;
     }());
+
   } else {
     NeedsBlockEnd = true;
   }
@@ -560,6 +562,7 @@ void OpDispatchBuilder::CALLAbsoluteOp(OpcodeArgs) {
   const uint64_t NextRIP = Op->PC + Op->InstSize;
   ExitFunction(JMPPCOffset, BranchHint::Call, ConstantPC, [&]() {
     auto CallReturnJumpTarget = JumpTargets.find(NextRIP);
+
     if (CallReturnJumpTarget != JumpTargets.end() && CallReturnJumpTarget->second.IsEntryPoint) {
       return CallReturnJumpTarget->second.BlockEntry;
     }

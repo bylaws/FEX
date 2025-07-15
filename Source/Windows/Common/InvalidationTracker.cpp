@@ -135,6 +135,10 @@ void InvalidationTracker::ReprotectRWXIntervals(uint64_t Address, uint64_t Size)
   const auto End = Address + Size;
   std::shared_lock Lock(IntervalsLock);
 
+  if (SMCDetectionDisabled) {
+    return;
+  }
+
   do {
     const auto Query = RWXIntervals.Query(Address);
     if (Query.Enclosed) {
@@ -189,6 +193,25 @@ FEXCore::HLE::ExecutableRangeInfo InvalidationTracker::QueryExecutableRange(uint
     return {RWXResult.Interval.Offset, RWXResult.Interval.End - RWXResult.Interval.Offset, RWXResult.Enclosed};
   }
   return {XResult.Interval.Offset, XResult.Interval.End - XResult.Interval.Offset, false};
+}
+
+void InvalidationTracker::DisableSMCDetection() {
+  std::unique_lock Lock(IntervalsLock);
+  SMCDetectionDisabled = true;
+  uint64_t Address = 0;
+
+  // Reprotect all RWX intervals as RWX
+  FEXCore::IntervalList<uint64_t>::QueryResult Query;
+  do {
+    Query = RWXIntervals.Query(Address);
+    if (Query.Enclosed) {
+      void* TmpAddress = reinterpret_cast<void*>(Address);
+      SIZE_T TmpSize = static_cast<SIZE_T>(Query.Size);
+      ULONG TmpProt;
+      NtProtectVirtualMemory(NtCurrentProcess(), &TmpAddress, &TmpSize, PAGE_EXECUTE_READWRITE, &TmpProt);
+    }
+    Address += Query.Size;
+  } while (Query.Size);
 }
 
 } // namespace FEX::Windows

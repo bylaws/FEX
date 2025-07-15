@@ -629,6 +629,7 @@ Arm64JITCore::Arm64JITCore(FEXCore::Context::ContextImpl* ctx, FEXCore::Core::In
     Common.PrintValue = reinterpret_cast<uint64_t>(PrintValue);
     Common.PrintVectorValue = reinterpret_cast<uint64_t>(PrintVectorValue);
     Common.ThreadRemoveCodeEntryFromJIT = reinterpret_cast<uintptr_t>(&Context::ContextImpl::ThreadRemoveCodeEntryFromJit);
+    Common.MonoBackpatcher = reinterpret_cast<uint64_t>(&Context::ContextImpl::MonoBackpatcher);
     Common.CPUIDObj = reinterpret_cast<uint64_t>(&CTX->CPUID);
 
     {
@@ -779,22 +780,22 @@ void Arm64JITCore::EmitInterruptChecks(bool CheckTF) {
   }
 
 #ifdef _M_ARM_64EC
-  static constexpr uint16_t SuspendMagic {0xCAFE};
+/*  static constexpr uint16_t SuspendMagic {0xCAFE};
 
   ldr(TMP2.W(), STATE_PTR(CpuStateFrame, SuspendDoorbell));
   ARMEmitter::ForwardLabel l_NoSuspend;
   cbz(ARMEmitter::Size::i32Bit, TMP2, &l_NoSuspend);
   brk(SuspendMagic);
-  Bind(&l_NoSuspend);
+  Bind(&l_NoSuspend);*/
 #endif
 }
 
 void Arm64JITCore::EmitEntryPoint(ARMEmitter::BackwardLabel& HeaderLabel, bool CheckTF) {
   // Get the address of the JITCodeHeader and store in to the core state.
   // Two instruction cost, each 1 cycle.
-  adr(TMP1, &HeaderLabel);
+/*  adr(TMP1, &HeaderLabel);
   str(TMP1, STATE, offsetof(FEXCore::Core::CPUState, InlineJITBlockHeader));
-
+*/
   EmitInterruptChecks(CheckTF);
 
   if (SpillSlots) {
