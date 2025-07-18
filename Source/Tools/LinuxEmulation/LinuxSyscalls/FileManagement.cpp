@@ -87,7 +87,7 @@ void FileManager::LoadThunkDatabase(fextl::unordered_map<fextl::string, ThunkDBO
       };
 
       // We only need to generate 32-bit or 64-bit depending on the operating mode.
-      const auto ArchPrefix = Is64BitMode() ? "lib64" : "lib";
+      const auto ArchPrefix = Is64BitMode() ? "lib" : "lib32";
 
       for (auto Prefix : LibPrefixes) {
         PathPrefixes.emplace_back(fextl::fmt::format("{}/{}", Prefix, ArchPrefix));
