@@ -139,6 +139,10 @@ static inline void SetState(void* ucontext, uint64_t val) {
   GetMContext(ucontext)->regs[28] = val;
 }
 
+static inline void SetFillSRASingleInst(void* ucontext, bool SingleInst) {
+  GetMContext(ucontext)->regs[1] = SingleInst;
+}
+
 static inline uint64_t GetArmReg(void* ucontext, uint32_t id) {
   return GetMContext(ucontext)->regs[id];
 }
