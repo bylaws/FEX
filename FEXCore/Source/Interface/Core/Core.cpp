@@ -915,9 +915,10 @@ static void InvalidateGuestThreadCodeRange(FEXCore::Core::InternalThreadState* T
   Thread->FrontendDecoder->ResetExecutableRangeCache();
 
   auto lk = Thread->LookupCache->AcquireLock();
+  auto& CodePages = Thread->LookupCache->Shared->CodePages;
 
-  auto lower = Thread->LookupCache->CodePages.lower_bound(Start >> 12);
-  auto upper = Thread->LookupCache->CodePages.upper_bound((Start + Length - 1) >> 12);
+  auto lower = CodePages.lower_bound(Start >> 12);
+  auto upper = CodePages.upper_bound((Start + Length - 1) >> 12);
 
   for (auto it = lower; it != upper; it++) {
     for (auto Address : it->second) {
