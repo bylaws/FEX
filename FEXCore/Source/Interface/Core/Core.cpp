@@ -7,7 +7,6 @@ tags: glue|driver
 desc: Glues Frontend, OpDispatcher and IR Opts & Compilation, LookupCache, Dispatcher and provides the Execution loop entrypoint
 $end_info$
 */
-#include "FEXCore/Utils/DebuggerPresence.h"
 
 #include <cstdint>
 #include "Interface/Core/ArchHelpers/Arm64Emitter.h"
@@ -866,29 +865,12 @@ ContextImpl::CompileCodeResult ContextImpl::CompileCode(FEXCore::Core::InternalT
   };
 }
 
-void ContextImpl::FinalizeAOTIRCache(FEXCore::Core::InternalThreadState& Thread, int fd, uint64_t BaseGuestEntry) {
+void ContextImpl::FinalizeAOTIRCache(FEXCore::Core::InternalThreadState& Thread, int fd, uint64_t Base) {
   auto CodeBuffer = GetLatest();
   auto& LookupCache = *Thread.LookupCache->Shared;
 
   /*const */ auto /*&*/ Relocations = Thread.CPUBackend->GetRelocations();
   // TODO: Drop relocations that don't belong to this library
-
-  auto SourceBinary = SyscallHandler->LookupAOTIRCacheEntry(&Thread, BaseGuestEntry);
-  if (!SourceBinary.Entry) {
-    fmt::print(stderr, "Skipping cache write-out since no backing binary was found\n");
-    return;
-  }
-
-  // Rebase relocations to library base address
-  // TODO: Do this in a dedicated "FinalizeRelocations" function
-  for (auto& Relocation : Relocations) {
-    switch (Relocation.Header.Type) {
-    case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_MOVE:
-    case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_LITERAL: Relocation.GuestRIPMove.GuestRIP -= SourceBinary.VAFileStart; break;
-    default:;
-    }
-  }
-
   // TODO: Verify source ELF is PIE, otherwise we'll need to factor in ELF relocations
 
   // Write file header
@@ -902,12 +884,14 @@ void ContextImpl::FinalizeAOTIRCache(FEXCore::Core::InternalThreadState& Thread,
     uint32_t NumBlockLinks;
     uint32_t CodeBufferSize;
     uint32_t NumRelocations;
+    uint64_t ImageGuestBase;
   } header;
   memcpy(&header.FEXVersion[0], GIT_SHORT_HASH, strlen(GIT_SHORT_HASH)); // TODO: Assert this is the correct length
   header.NumBlocks = LookupCache.BlockList.size();
   header.NumBlockLinks = LookupCache.BlockLinks->size();
   header.CodeBufferSize = CodeBuffer->UsedSize;
   header.NumRelocations = Relocations.size();
+  header.ImageGuestBase = Base;
   ::write(fd, &header, sizeof(header));
 
   // Dump guest<->host block mappings
@@ -917,34 +901,25 @@ void ContextImpl::FinalizeAOTIRCache(FEXCore::Core::InternalThreadState& Thread,
   {
     fextl::vector<decltype(LookupCache.BlockList)::value_type> BlockList {LookupCache.BlockList.begin(), LookupCache.BlockList.end()};
     for (auto [Guest, Host] : LookupCache.BlockList) {
-      Guest -= SourceBinary.VAFileStart;
       ::write(fd, &Guest, sizeof(Guest));
       Host -= reinterpret_cast<uintptr_t>(CodeBuffer->Ptr);
       ::write(fd, &Host, sizeof(Host));
     }
   }
-  for (auto& [Record, _] : *LookupCache.BlockLinks) {
-    // TODO: Consider if we need to serialize this data
-
-    // NOTE: This is assumed to always be a direct link, since indirect ones would likely point to a (different) shared library
-    // // TODO: Needs JIT interface to distinguish direct from indirect links
-    // ERROR_AND_DIE_FMT("TODO: Implement BlockLinks writing");
-    // auto Data = std::pair {Guest, Host};
-    // ::write(fd, &Data, sizeof(Data));
-  }
-
+ 
   std::vector<std::byte> CodeBufferData(CodeBuffer->UsedSize);
   if (!CodeBufferData.empty()) {
     memcpy(CodeBufferData.data(), CodeBuffer->Ptr, CodeBufferData.size());
   }
-  (void)Thread.CPUBackend->RelocateJITObjectCode(SourceBinary.VAFileStart, CodeBufferData, Relocations, true);
+  //(void)Thread.CPUBackend->RelocateJITObjectCode(Base, CodeBufferData, Relocations, true);
+
 
   // Dump relocations
   ::write(fd, Relocations.data(), Relocations.size() * sizeof(Relocations[0]));
 
   // Pad to next page in file so that the CodeBuffer can be mmap'ed into process on load
   char Zero[64] {};
-  auto Off = lseek(fd, 0, SEEK_CUR);
+  auto Off = _lseek(fd, 0, SEEK_CUR);
   while (Off != AlignUp(Off, Utils::FEX_PAGE_SIZE)) {
     auto BytesToWrite = std::min(AlignUp(Off, Utils::FEX_PAGE_SIZE) - Off, sizeof(Zero));
     ::write(fd, Zero, BytesToWrite);
@@ -963,6 +938,7 @@ void ContextImpl::FinalizeAOTIRCache(FEXCore::Core::InternalThreadState& Thread,
   // * Referenced libraries
 }
 
+volatile bool a;
 uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_t GuestRIP, uint64_t MaxInst) {
   auto Thread = Frame->Thread;
   FEXCORE_PROFILE_SCOPED("CompileBlock");
@@ -978,6 +954,7 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
   // Is the code in the cache?
   // The backends only check L1 and L2, not L3
   if (auto HostCode = Thread->LookupCache->FindBlock(GuestRIP)) {
+    LogMan::Msg::EFmt("aaa {:X} {:X}", GuestRIP, (uint64_t)HostCode);
     return HostCode;
   }
 
@@ -1052,6 +1029,8 @@ uintptr_t ContextImpl::CompileBlock(FEXCore::Core::CpuStateFrame* Frame, uint64_
         SyscallHandler->MarkGuestExecutableRange(Thread, CodePage, FEXCore::Utils::FEX_PAGE_SIZE);
       }
     }
+
+    SyscallHandler->MarkGuestBlockEntry(Thread, GuestRIP);
   }
 
   // Insert to lookup cache
@@ -1257,261 +1236,153 @@ IR::AOTIRCacheEntry* ContextImpl::LoadAOTIRCacheEntry(const fextl::string& filen
   return rv;
 }
 
-void ContextImpl::FetchAOTIRCacheEntry(FEXCore::Core::InternalThreadState* Thread, uintptr_t GuestRIP) {
-  if (!GuestRIP) {
-    fextl::unordered_set<uint64_t> Bases;
-    SyscallHandler->ForEachVMAMapping(Thread, [&Bases](uint64_t Base) { Bases.insert(Base); });
-    for (auto Base : Bases) {
-      FetchAOTIRCacheEntry(Thread, Base);
+static uint64_t GetNamedSymbolLiteral(ContextImpl *CTX, FEXCore::CPU::RelocNamedSymbolLiteral::NamedSymbol Op) {
+  switch (Op) {
+  case FEXCore::CPU::RelocNamedSymbolLiteral::NamedSymbol::SYMBOL_LITERAL_EXITFUNCTION_LINKER:
+    return CTX->Dispatcher->ExitFunctionLinkerAddress;
+    break;
+  default: ERROR_AND_DIE_FMT("Unknown named symbol literal: {}", static_cast<uint32_t>(Op)); break;
+  }
+  return ~0ULL;
+}
+
+static 
+bool ApplyRelocations(ContextImpl *CTX, uint64_t GuestEntry, std::span<std::byte> CodeBufferRange, std::span<const FEXCore::CPU::Relocation> EntryRelocations) {
+  CPU::Arm64Emitter Emit(CTX, reinterpret_cast<uint8_t*>(CodeBufferRange.data()), CodeBufferRange.size_bytes());
+
+  for (auto &Reloc : EntryRelocations) {
+    // fextl::fmt::print(stderr, "RELOCATION {}: {}\n", j, ToUnderlying(Reloc.Header.Type));
+    switch (Reloc.Header.Type) {
+    case FEXCore::CPU::RelocationTypes::RELOC_NAMED_SYMBOL_LITERAL: {
+      uint64_t Pointer = GetNamedSymbolLiteral(CTX, Reloc.NamedSymbolLiteral.Symbol);
+      // Relocation occurs at the cursorEntry + offset relative to that cursor
+      Emit.SetCursorOffset(Reloc.NamedSymbolLiteral.Offset);
+
+      // Generate a literal so we can place it
+      Emit.dc64(Pointer);
+
+      break;
     }
+    case FEXCore::CPU::RelocationTypes::RELOC_NAMED_THUNK_MOVE: {
+      uint64_t Pointer =reinterpret_cast<uint64_t>(CTX->ThunkHandler->LookupThunk(Reloc.NamedThunkMove.Symbol));
+      if (Pointer == ~0ULL) {
+        return false;
+      }
+
+      // Relocation occurs at the cursorEntry + offset relative to that cursor.
+      Emit.SetCursorOffset(Reloc.NamedThunkMove.Offset);
+      Emit.LoadConstant(ARMEmitter::Size::i64Bit, ARMEmitter::Register(Reloc.NamedThunkMove.RegisterIndex), Pointer, true);
+      break;
+    }
+    case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_MOVE: {
+      // TODO: In particular, should assert the RIP is still in the same library!
+      // TODO: This often comes up for GOT/PLT tables... is the offset always fixed?
+      uint64_t Pointer = Reloc.GuestRIPMove.GuestRIP + GuestEntry;
+
+      // Re-emit constant in case it requires more/fewer instructions at the new location
+      // TODO: Can this overflow for 32-bit?
+      Emit.SetCursorOffset(Reloc.GuestRIPMove.Offset);
+      Emit.LoadConstant(ARMEmitter::Size::i64Bit, ARMEmitter::Register(Reloc.GuestRIPMove.RegisterIndex), Pointer, true);
+      break;
+    }
+
+    case FEXCore::CPU::RelocationTypes::RELOC_GUEST_RIP_LITERAL: {
+      // TODO: For this to function, I think the page alignment of arm code within the original host page and the new host page must be the same?
+
+      // fextl::fmt::print(stderr, "  GUEST_RIP_LITERAL patching host addr {:#x} / {:#x}: RIP delta {:#x} -> {:#x}\n", Reloc.GuestRIPMove.Offset,
+      //                   CodeEntry + Reloc.GuestRIPMove.Offset, Reloc.GuestRIPMove.GuestRIP, GuestEntry + Reloc.GuestRIPMove.GuestRIP);
+      Emit.SetCursorOffset(Reloc.GuestRIPMove.Offset);
+      Emit.dc64((GuestEntry + Reloc.GuestRIPMove.GuestRIP) & (CTX->Config.Is64BitMode() ? 0xffff'ffff'ffff'ffff : 0xffff'ffff));
+      break;
+    }
+    default: ERROR_AND_DIE_FMT("Unknown relocation type {}", ToUnderlying(Reloc.Header.Type));
+    }
+  }
+
+  return true;
+}
+
+void ContextImpl::FetchAOTIRCacheEntry(uint8_t* AOTImagePtr, uint64_t LoadAddress) {
+  auto Lock = std::unique_lock {CodeBufferWriteMutex};
+  // TODO: Acquire write mutex?
+    LogMan::Msg::EFmt("aa {}", __LINE__);
+
+  auto CodeBuffer = GetLatest();
+  auto& LookupCache = *CodeBuffer->LookupCache;
+  auto lk = LookupCache.AcquireLock();
+
+  // TODO: Verify source ELF is PIE, otherwise we'll need to factor in ELF relocations
+  size_t Offset = 0;
+
+  // Read file header
+  struct Header {
+    char Magic[4] = {'F', 'A', 'O', 'T'};
+    uint32_t FormatVersion = 1;
+    char FEXVersion[8] = {};
+    uint32_t NumBlocks;
+    uint32_t NumBlockLinks;
+    uint32_t CodeBufferSize;
+    uint32_t NumRelocations;
+    uint64_t ImageGuestBase;
+  } *header = reinterpret_cast<Header *>(AOTImagePtr + Offset);
+  Offset += sizeof(Header);
+
+  char ExpectedVersion[8] = GIT_SHORT_HASH;
+  std::fill(std::begin(ExpectedVersion) + strlen(GIT_SHORT_HASH), std::end(ExpectedVersion), 0);
+  if (!std::equal(std::begin(header->FEXVersion), std::end(header->FEXVersion), std::begin(ExpectedVersion), std::end(ExpectedVersion))) {
+    LogMan::Msg::EFmt("Version mismatch: {:02x} {:02x}\n", fmt::join(std::begin(header->FEXVersion), std::end(header->FEXVersion), ""),
+                      fmt::join(std::begin(ExpectedVersion), std::end(ExpectedVersion), ""));
+    ERROR_AND_DIE_FMT("Version mismatch");
+  }
+
+  // Align CodeBuffer to next page
+  // TODO: Use CodeBuffers.LatestOffset instead!!!
+  LatestOffset = AlignUp((uintptr_t)LatestOffset, 0x1000);
+
+  std::span<std::byte> CodeBufferRange =
+    std::as_writable_bytes(std::span {CodeBuffer->Ptr, CodeBuffer->Ptr + CodeBuffer->Size}).subspan(LatestOffset, header->CodeBufferSize);
+
+
+  // Read guest<->host block mappings
+  // TODO: Strip ASLR-dependence by relocating to base ELF offset
+  // TODO: Verify this all relates to the dumped ELF (and not any of its dependencies)
+  std::span<decltype(LookupCache.BlockList)::value_type> BlockList(reinterpret_cast<decltype(LookupCache.BlockList)::value_type*>(AOTImagePtr + Offset), header->NumBlocks);
+  Offset += BlockList.size_bytes();
+  if (BlockList.empty()) {
+    LogMan::Msg::IFmt("Code cache empty, aborting");
     return;
   }
 
-  auto Lock = std::unique_lock {CodeBufferWriteMutex};
-
-  auto GuestRIPLookup = SyscallHandler->LookupAOTIRCacheEntry(Thread, GuestRIP);
-  if (!GuestRIPLookup.Entry) {
-    // Skip cache
-  } else {
-    // auto OldCodeBuffer = Thread->CPUBackend->CurrentCodeBuffer;
-    // Thread->CPUBackend->AllocateAndSetCodeBufferForRegion(reinterpret_cast<uintptr_t>(GuestRIPLookup.Entry));
-
-    if (!Config.Is64BitMode()) {
-      // TODO: This is required when 32-bit Wine launches 64-bit applications...
-      return;
-    }
-
-    if (!GuestRIPLookup.Entry->FileId.starts_with("ls-")) {
-      // return;
-    }
-    if (GuestRIPLookup.Entry->FileId.starts_with("ls-")) {
-      // return;
-    }
-
-    int fd = open(fextl::fmt::format("/tmp/fexcache/{}", GuestRIPLookup.Entry->FileId).c_str(), O_RDONLY);
-    if (fd == -1) {
-      // ERROR_AND_DIE_FMT("TODO: Failed loading cache");
-      return;
-    }
-
-    LogMan::Msg::IFmt("LoadAll to {:#x} via VA base {:#x}: {} ({:#x}-{:#x})", GuestRIP, GuestRIPLookup.VAFileStart, GuestRIPLookup.Entry->FileId, GuestRIPLookup.VMABegin, GuestRIPLookup.VMAEnd);
-
-    const bool force_recompile = false;
-
-    {
-      // TODO: Acquire write mutex?
-
-      auto CodeBuffer = GetLatest();
-      auto& LookupCache = *Thread->LookupCache->Shared;
-
-      // TODO: Verify source ELF is PIE, otherwise we'll need to factor in ELF relocations
-
-      // Read file header
-      struct Header {
-        char Magic[4] = {'F', 'A', 'O', 'T'};
-        uint32_t FormatVersion = 1;
-        char FEXVersion[8] = {};
-        uint32_t NumBlocks;
-        uint32_t NumBlockLinks;
-        uint32_t CodeBufferSize;
-        uint32_t NumRelocations;
-      } header;
-      memcpy(&header.FEXVersion[0], GIT_SHORT_HASH, strlen(GIT_SHORT_HASH));
-      ::read(fd, &header, sizeof(header));
-
-      char ExpectedVersion[8] = GIT_SHORT_HASH;
-      std::fill(std::begin(ExpectedVersion) + strlen(GIT_SHORT_HASH), std::end(ExpectedVersion), 0);
-      if (!std::equal(std::begin(header.FEXVersion), std::end(header.FEXVersion), std::begin(ExpectedVersion), std::end(ExpectedVersion))) {
-        fextl::fmt::print(stderr, "Version mismatch: {:02x} {:02x}\n", fmt::join(std::begin(header.FEXVersion), std::end(header.FEXVersion), ""),
-                          fmt::join(std::begin(ExpectedVersion), std::end(ExpectedVersion), ""));
-        ERROR_AND_DIE_FMT("Version mismatch");
-      }
-
-      // Align CodeBuffer to next page
-      // TODO: Use CodeBuffers.LatestOffset instead!!!
-      if (reinterpret_cast<uintptr_t>(CodeBuffer->Ptr) % 0x1000) {
-        ERROR_AND_DIE_FMT("TODO: Expected CodeBuffer to be page-aligned");
-      }
-      auto Delta = AlignUp((uintptr_t)CodeBuffer->UsedSize, 0x1000) - (uintptr_t)CodeBuffer->UsedSize;
-      CodeBuffer->UsedSize += Delta;
-
-      std::span<std::byte> CodeBufferRange =
-        std::as_writable_bytes(std::span {CodeBuffer->Ptr, CodeBuffer->Ptr + CodeBuffer->Size}).subspan(CodeBuffer->UsedSize, header.CodeBufferSize);
-
-      // Read guest<->host block mappings
-      // TODO: Strip ASLR-dependence by relocating to base ELF offset
-      // TODO: Verify this all relates to the dumped ELF (and not any of its dependencies)
-      fextl::vector<decltype(LookupCache.BlockList)::value_type> BlockList(header.NumBlocks);
-      {
-        ::read(fd, BlockList.data(), sizeof(BlockList[0]) * BlockList.size());
-
-        if (BlockList.empty()) {
-          LogMan::Msg::IFmt("Code cache empty, aborting");
-          return;
-        }
-
-        // Consistency check: VMA regions at the top and end should belong to the same file
-        {
-          auto [min_val, max_val] = std::minmax_element(BlockList.begin(), BlockList.end());
-          auto MinBound = SyscallHandler->LookupAOTIRCacheEntry(Thread, min_val->first + GuestRIPLookup.VAFileStart);
-          auto MaxBound = SyscallHandler->LookupAOTIRCacheEntry(Thread, max_val->first + GuestRIPLookup.VAFileStart);
-          if (MinBound.Entry != GuestRIPLookup.Entry || MaxBound.Entry != GuestRIPLookup.Entry) {
-            ERROR_AND_DIE_FMT("Cached blocks offsets {:#x}-{:#x} out of bounds for guest library {} ({} @ {:#x}) while trying to load section {:#x}-{:#x}!",
-                              min_val->first, max_val->first,
-                              GuestRIPLookup.Entry->Filename, GuestRIPLookup.Entry->FileId,
-                              GuestRIPLookup.VAFileStart,
-                              GuestRIPLookup.VMABegin, GuestRIPLookup.VMAEnd);
-          }
-        }
-
-        decltype(BlockList) BlockList2;
-        std::copy_if( BlockList.begin(), BlockList.end(), std::back_insert_iterator(BlockList2),
-                      [&](auto& Entry) {
-                        return (Entry.first + GuestRIPLookup.VAFileStart >= GuestRIPLookup.VMABegin &&
-                                Entry.first + GuestRIPLookup.VAFileStart < GuestRIPLookup.VMAEnd);
-                      });
-        // TODO: Sort when writing the cache instead!
-        std::sort(BlockList2.begin(), BlockList2.end(), [](auto& a, auto& b) { return a.first < b.first; });
-        BlockList = std::move(BlockList2);
-        if (BlockList.empty()) {
-          LogMan::Msg::IFmt("No blocks cached in this range, aborting");
-          return;
-        }
-
-        for (auto& [Guest, Host] : BlockList) {
-          // TODO: Can we keep this enabled when re-compiling?
-          if (!force_recompile) {
-            LookupCache.BlockList[Guest + GuestRIPLookup.VAFileStart] = Host + reinterpret_cast<uintptr_t>(CodeBufferRange.data());
-
-            // Trigger decoder to ensure executable ranges are registered to GuestToHostMap
-            const uint8_t* GuestCode {};
-            GuestCode = reinterpret_cast<const uint8_t*>(Guest + GuestRIPLookup.VAFileStart);
-            Thread->FrontendDecoder->DecodeInstructionsAtEntry(GuestCode, Guest + GuestRIPLookup.VAFileStart, 0 /* TODO: MaxInst */);
-          }
-        }
-      }
-
-      // TODO: De-serialize BlockLinks (if needed)
-
-      // Read relocations
-      fextl::vector<FEXCore::CPU::Relocation> Relocations(header.NumRelocations);
-      ::read(fd, Relocations.data(), Relocations.size() * sizeof(Relocations[0]));
-      // TODO: Store relocations in JIT for later re-relocation
-
-      // Pad to next page in file, which contains CodeBuffer data
-      char Zero[64] {};
-      auto Off = lseek(fd, 0, SEEK_CUR);
-      while (Off != AlignUp(Off, Utils::FEX_PAGE_SIZE)) {
-        auto BytesToWrite = std::min(AlignUp(Off, Utils::FEX_PAGE_SIZE) - Off, sizeof(Zero));
-        ::lseek(fd, BytesToWrite, SEEK_CUR);
-        Off += BytesToWrite;
-      }
-
-      // Read CodeBuffer from file
-      // TODO: mmap this into memory instead
-      if (header.CodeBufferSize > CodeBufferRange.size_bytes()) {
-        ERROR_AND_DIE_FMT("TODO: CodeBuffer too small to load initial cache");
-      }
-      ::read(fd, CodeBufferRange.data(), header.CodeBufferSize);
-      CodeBuffer->UsedSize += header.CodeBufferSize;
-      Thread->CPUBackend->ImportCode(header.CodeBufferSize);
-
-      // Apply FEX relocations
-      // TODO: Change parameter to span<byte>
-      auto CompiledCode = Thread->CPUBackend->RelocateJITObjectCode(GuestRIPLookup.VAFileStart, CodeBufferRange, Relocations, false);
-      // TODO: Update UsedSize?
-
-      // TODO: Invalidate any pages that are affected by ELF relocations (and eventually add support for converting those relocations to FEX relocations)
-
-      LogMan::Msg::IFmt("Loaded cache: {}-{} ({}/{} blocks, {} relocs)", fmt::ptr(CodeBufferRange.data()),
-                        fmt::ptr(CodeBufferRange.data() + header.CodeBufferSize), BlockList.size(), header.NumBlocks, Relocations.size());
-
-      auto CodeDumpFDBackup = std::exchange(CodeDumpFD, -1);
-      if (force_recompile) {
-        auto Delta = AlignUp((uintptr_t)CodeBuffer->UsedSize, 0x1000) - (uintptr_t)CodeBuffer->UsedSize;
-        CodeBuffer->UsedSize += Delta;
-        // Force page-alignment...
-        Thread->CPUBackend->ImportCode(0);
-
-        std::span<std::byte> CodeBufferRangeRef = std::as_writable_bytes(std::span {CodeBuffer->Ptr, CodeBuffer->Ptr + CodeBuffer->Size})
-                                                    .subspan(/*CodeBuffer->UsedSize*/ FEXCore::CPU::TheOff, header.CodeBufferSize);
-
-        fextl::set<uint64_t> BlockListSorted;
-        for (auto& [Guest, Host] : BlockList) {
-          BlockListSorted.insert(Guest);
-        }
-        while (!BlockListSorted.empty()) {
-          auto& Guest = *BlockListSorted.begin();
-          auto [CompiledBlocks, _, _2, _3] = CompileCode(Thread, Guest + GuestRIPLookup.VAFileStart, 0x1234 /* Indicate lock is already held */);
-          // TODO: assert CompiledBlocks.EntryPoints.contains(Guest + GuestRIPLookup.VAFileStart);
-          for (auto& Entry : CompiledBlocks.EntryPoints) {
-            BlockListSorted.erase(Entry.first - GuestRIPLookup.VAFileStart);
-          }
-        }
-
-        // TODO: Properly limit CodeBufferRangeRef to the size of the newly compiled code... For now approximating this at the expense of not properly comparing the last block
-        CodeBufferRangeRef = CodeBufferRangeRef.subspan(0, BlockList.back().second - BlockList.front().second);
-
-        fextl::fmt::print(stderr, "Regenerated cache\n");
-        uint64_t drift = BlockList.front().second - sizeof(CPU::CPUBackend::JITCodeHeader);
-        if (!BlockList.empty() && !std::equal(CodeBufferRange.begin() + drift,
-                                              CodeBufferRange.begin() + drift + CodeBufferRangeRef.size(),
-                                              CodeBufferRangeRef.begin(),
-                                              CodeBufferRangeRef.end())) {
-          for (size_t Idx = 0; Idx < CodeBufferRangeRef.size(); ++Idx) {
-            if (CodeBufferRange[drift + Idx] != CodeBufferRangeRef[Idx]) {
-              fextl::set<uint64_t> BlockHostAddrs;
-              for (auto [_, HostAddr] : BlockList) {
-                BlockHostAddrs.insert(HostAddr);
-              }
-              auto BlockIt = BlockHostAddrs.lower_bound(drift + Idx + sizeof(CPU::CPUBackend::JITCodeHeader)); // If Idx points to JITCodeHeader, adding the header size will ensure the proper block is selected
-              std::optional<uint64_t> GuestBlockAddr;
-              std::optional<uint64_t> GuestBlockAddrRef;
-              CPU::CPUBackend::JITCodeTail* tail;
-              if (BlockIt != BlockHostAddrs.end()) {
-                {
-                  auto header = reinterpret_cast<CPU::CPUBackend::JITCodeHeader*>(&CodeBufferRange[*BlockIt] - sizeof(CPU::CPUBackend::JITCodeHeader));
-                  auto tail = reinterpret_cast<CPU::CPUBackend::JITCodeTail*>(reinterpret_cast<uintptr_t>(header) + header->OffsetToBlockTail);
-                  GuestBlockAddr = tail->RIP - GuestRIPLookup.VAFileStart;
-                  LogMan::Msg::EFmt("recorded rip 1: {:#x} - {:#x}", tail->RIP,  GuestRIPLookup.VAFileStart);
-                }
-
-                  auto header = reinterpret_cast<CPU::CPUBackend::JITCodeHeader*>(&CodeBufferRangeRef[*BlockIt - drift] - sizeof(CPU::CPUBackend::JITCodeHeader));
-                  tail = reinterpret_cast<CPU::CPUBackend::JITCodeTail*>(reinterpret_cast<uintptr_t>(header) + header->OffsetToBlockTail);
-                {
-                  GuestBlockAddrRef = tail->RIP - GuestRIPLookup.VAFileStart;
-                  LogMan::Msg::EFmt("recorded rip 2: {:#x} - {:#x}", tail->RIP,  GuestRIPLookup.VAFileStart);
-                }
-
-              }
-              LogMan::Msg::EFmt("Mismatch at host block {:#x}", *BlockIt);
-
-              LogMan::Msg::EFmt("MISMATCH AT IDX {:#x}: {:#02x} <-> {:#02x}, {} <-> {} (guest block {:#x} / {:#x}), {} ({})", Idx, CodeBufferRange[Idx + drift],
-                                CodeBufferRangeRef[Idx], fmt::ptr(CodeBufferRange.data() + drift), fmt::ptr(CodeBufferRangeRef.data()), GuestBlockAddr.value_or(0), GuestBlockAddrRef.value_or(0), ::getpid(),
-                                GuestRIPLookup.Entry->FileId);
-              while (!FEXCore::IsDebuggerAttached()) {
-                std::this_thread::sleep_for(std::chrono::milliseconds(50));
-              }
-              if (tail)
-              {
-                auto [IRView, TotalInstructions, TotalInstructionsLength, StartAddr, Length] =
-                  GenerateIR(Thread, tail->RIP, false, 10000 /* TODO? */);
-                fextl::stringstream ss;
-                FEXCore::IR::Dump(&ss, &*IRView);
-                LogMan::Msg::EFmt("IR ({}):\n{}", Config.Is64BitMode(), ss.str());
-              }
-              ERROR_AND_DIE_FMT("Bla");
-            }
-          }
-        }
-      }
-      CodeDumpFD = CodeDumpFDBackup;
-    }
-    close(fd);
-
-    // new_cache.LoadAll(SyscallHandler, Thread, *this, GuestRIPLookup);
-    // Thread->CPUBackend->CurrentCodeBuffer = OldCodeBuffer;
+  for (auto& [Guest, Host] : BlockList) {
+    LookupCache.BlockList[Guest + LoadAddress - header->ImageGuestBase] = Host + reinterpret_cast<uintptr_t>(CodeBufferRange.data());
+/*      GuestCode = reinterpret_cast<const uint8_t*>(Guest + GuestRIPLookup.VAFileStart);
+      Thread->FrontendDecoder->DecodeInstructionsAtEntry(GuestCode, Guest + GuestRIPLookup.VAFileStart, 0 );
+    } replace this entirely with guest2host map serialisation */
   }
+
+  // TODO: De-serialize BlockLinks (if needed)
+  std::span<FEXCore::CPU::Relocation> Relocations(reinterpret_cast<FEXCore::CPU::Relocation *>(AOTImagePtr + Offset), header->NumRelocations);
+  Offset += Relocations.size_bytes();
+
+
+  // Pad to next page in file, which contains CodeBuffer data
+  Offset = AlignUp(reinterpret_cast<uintptr_t>(AOTImagePtr + Offset), Utils::FEX_PAGE_SIZE) - reinterpret_cast<uintptr_t>(AOTImagePtr);
+
+  // Read CodeBuffer from file
+  // TODO: mmap this into memory instead
+  if (header->CodeBufferSize > CodeBufferRange.size_bytes()) {
+    ERROR_AND_DIE_FMT("TODO: CodeBuffer too small to load initial cache");
+  }
+  memcpy(CodeBufferRange.data(), AOTImagePtr + Offset, header->CodeBufferSize);
+  LatestOffset += header->CodeBufferSize;
+  CodeBuffer->UsedSize = LatestOffset;
+
+
+  // Apply FEX relocations
+  // TODO: Change parameter to span<byte>
+  ApplyRelocations(this, LoadAddress - header->ImageGuestBase, CodeBufferRange, Relocations);
+  LogMan::Msg::EFmt("LOADED {:X} {:X} {:X} {:X}", LoadAddress, header->ImageGuestBase, (uintptr_t)CodeBufferRange.data(), CodeBufferRange.size_bytes());
+  // TODO: Update UsedSize?
 }
 
 void ContextImpl::UnloadAOTIRCacheEntry(IR::AOTIRCacheEntry* Entry) {

@@ -166,7 +166,7 @@ public:
   FEX_DEFAULT_VISIBILITY virtual FEXCore::CPUID::FunctionResults RunCPUIDFunctionName(uint32_t Function, uint32_t Leaf, uint32_t CPU) = 0;
 
   FEX_DEFAULT_VISIBILITY virtual FEXCore::IR::AOTIRCacheEntry* LoadAOTIRCacheEntry(const fextl::string& Name) = 0;
-  FEX_DEFAULT_VISIBILITY virtual void FetchAOTIRCacheEntry(FEXCore::Core::InternalThreadState* Thread, uintptr_t GuestRIP) = 0;
+  FEX_DEFAULT_VISIBILITY virtual void FetchAOTIRCacheEntry(uint8_t* AOTImagePtr, uint64_t LoadAddress) = 0;
   FEX_DEFAULT_VISIBILITY virtual void UnloadAOTIRCacheEntry(FEXCore::IR::AOTIRCacheEntry* Entry) = 0;
 
   FEX_DEFAULT_VISIBILITY virtual void SetAOTIRLoader(AOTIRLoaderCBFn CacheReader) = 0;

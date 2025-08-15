@@ -81,9 +81,10 @@ public:
   virtual void InvalidateGuestCodeRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Start, uint64_t Length) {}
   virtual void MarkOvercommitRange(uint64_t Start, uint64_t Length) {}
   virtual void UnmarkOvercommitRange(uint64_t Start, uint64_t Length) {}
+  virtual void MarkGuestBlockEntry(FEXCore::Core::InternalThreadState* Thread, uint64_t Entry) {}
   virtual ExecutableRangeInfo QueryGuestExecutableRange(FEXCore::Core::InternalThreadState* Thread, uint64_t Address) = 0;
   virtual AOTIRCacheEntryLookupResult LookupAOTIRCacheEntry(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestAddr) = 0;
-  virtual void ForEachVMAMapping(FEXCore::Core::InternalThreadState*, std::function<void(uint64_t)>) = 0;
+//  virtual void ForEachVMAMapping(FEXCore::Core::InternalThreadState*, std::function<void(uint64_t)>) = 0;
 
   virtual void PreCompile() {}
 

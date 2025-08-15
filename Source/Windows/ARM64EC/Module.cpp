@@ -31,6 +31,7 @@ $end_info$
 #include "Common/CallRetStack.h"
 #include "Common/Config.h"
 #include "Common/Exception.h"
+#include "Common/ImageTracker.h"
 #include "Common/InvalidationTracker.h"
 #include "Common/OvercommitTracker.h"
 #include "Common/TSOHandlerConfig.h"
@@ -132,6 +133,7 @@ fextl::unique_ptr<FEX::Windows::StatAlloc> StatAllocHandler;
 std::optional<FEX::Windows::InvalidationTracker> InvalidationTracker;
 std::optional<FEX::Windows::CPUFeatures> CPUFeatures;
 std::optional<FEX::Windows::OvercommitTracker> OvercommitTracker;
+std::optional<FEX::Windows::ImageTracker> ImageTracker;
 
 std::recursive_mutex ThreadCreationMutex;
 // Map of TIDs to their FEX thread state, `ThreadCreationMutex` must be locked when accessing
@@ -308,14 +310,22 @@ void LoadImageVolatileMetadata(uint64_t Address) {
   CTX->AddForceTSOInformation(VolatileValidRanges, std::move(VolatileInstructions));
 }
 
-void HandleImageMap(uint64_t Address) {
-  fextl::string ModuleName = FEX::Windows::GetSectionFilePath(Address);
+void HandleImageMap(uint64_t Address, bool MainImage = false) {
+  fextl::string ModulePath = FEX::Windows::GetSectionFilePath(Address);
+  fextl::string ModuleName = fextl::string{FEX::Windows::BaseName(ModulePath)};
   LogMan::Msg::DFmt("Load module {}: {:X}", ModuleName, Address);
   FEX_CONFIG_OPT(VolatileMetadata, VOLATILEMETADATA);
   if (VolatileMetadata) {
     LoadImageVolatileMetadata(Address);
   }
   InvalidationTracker->HandleImageMap(ModuleName, Address);
+  ImageTracker->HandleImageMap(ModulePath, Address, MainImage);
+}
+
+void HandleImageUnmap(uint64_t Address, uint64_t Size) {
+  ImageTracker->HandleImageUnmap(Address);
+  std::scoped_lock Lock(CTX->GetCodeInvalidationMutex());
+  CTX->RemoveForceTSOInformation(Address, Size);
 }
 } // namespace
 
@@ -577,6 +587,10 @@ public:
     InvalidationTracker->InvalidateAlignedInterval(Start, Length, false);
   }
 
+  void MarkGuestBlockEntry(FEXCore::Core::InternalThreadState* Thread, uint64_t Entry) override {
+    ImageTracker->MarkGuestBlockEntry(Entry);
+  }
+
   void MarkOvercommitRange(uint64_t Start, uint64_t Length) override {
     OvercommitTracker->MarkRange(Start, Length);
   }
@@ -614,7 +628,7 @@ NTSTATUS ProcessInit() {
 
   FEX::Windows::InitCRTProcess();
   const auto ExecutablePath = FEX::Windows::GetExecutableFilePath();
-  FEX::Config::LoadConfig(nullptr, ExecutablePath, nullptr, FEX::ReadPortabilityInformation());
+  FEX::Config::LoadConfig(nullptr, fextl::string{FEX::Windows::BaseName(ExecutablePath)}, nullptr, FEX::ReadPortabilityInformation());
   FEXCore::Config::ReloadMetaLayer();
   FEX::Windows::Logging::Init();
 
@@ -644,11 +658,12 @@ NTSTATUS ProcessInit() {
   CTX->InitCore();
   Exception::HandlerConfig.emplace(*CTX);
   InvalidationTracker.emplace(*CTX, Threads);
-
-  HandleImageMap(NtDllBase);
+  ImageTracker.emplace(*CTX);
 
   auto MainModule = reinterpret_cast<__TEB*>(NtCurrentTeb())->Peb->ImageBaseAddress;
-  HandleImageMap(reinterpret_cast<uint64_t>(MainModule));
+  HandleImageMap(reinterpret_cast<uint64_t>(MainModule), true);
+  HandleImageMap(NtDllBase);
+
 
   CPUFeatures.emplace(*CTX);
 
@@ -874,8 +889,7 @@ void NotifyUnmapViewOfSection(void* Address, BOOL After, NTSTATUS Status) {
     ThreadCreationMutex.lock();
     auto [Start, Size] = InvalidationTracker->InvalidateContainingSection(reinterpret_cast<uint64_t>(Address), true);
     if (Size) {
-      std::scoped_lock Lock(CTX->GetCodeInvalidationMutex());
-      CTX->RemoveForceTSOInformation(Start, Size);
+      HandleImageUnmap(Start, Size);
     }
   } else {
     ThreadCreationMutex.unlock();

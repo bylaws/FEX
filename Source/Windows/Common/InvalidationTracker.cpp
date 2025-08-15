@@ -103,7 +103,8 @@ void InvalidationTracker::HandleImageMap(std::string_view Name, uint64_t Address
 
 InvalidationTracker::InvalidateContainingSectionResult InvalidationTracker::InvalidateContainingSection(uint64_t Address, bool Free) {
   MEMORY_BASIC_INFORMATION Info;
-  if (NtQueryVirtualMemory(NtCurrentProcess(), reinterpret_cast<void*>(Address), MemoryBasicInformation, &Info, sizeof(Info), nullptr)) {
+  if (NtQueryVirtualMemory(NtCurrentProcess(), reinterpret_cast<void*>(Address), MemoryBasicInformation, &Info, sizeof(Info), nullptr) ||
+      Info.State == MEM_FREE) {
     return {Address, 0};
   }
 

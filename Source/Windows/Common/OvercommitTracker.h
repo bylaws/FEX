@@ -2,6 +2,7 @@
 #pragma once
 
 #include <FEXCore/Utils/IntervalList.h>
+#include <FEXCore/Utils/TypeDefines.h>
 #include <thread>
 #include <shared_mutex>
 

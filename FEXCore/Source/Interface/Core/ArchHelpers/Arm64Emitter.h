@@ -104,7 +104,7 @@ constexpr ARMEmitter::PRegister PRED_TMP_32B = ARMEmitter::PReg::p7;
 // This class contains common emitter utility functions that can
 // be used by both Arm64 JIT and ARM64 Dispatcher
 class Arm64Emitter : public ARMEmitter::Emitter {
-protected:
+public:
   Arm64Emitter(FEXCore::Context::ContextImpl* ctx, void* EmissionPtr = nullptr, size_t size = 0);
 
   FEXCore::Context::ContextImpl* EmitterCTX;

@@ -147,7 +147,7 @@ public:
   FEXCore::CPUID::FunctionResults RunCPUIDFunctionName(uint32_t Function, uint32_t Leaf, uint32_t CPU) override;
 
   FEXCore::IR::AOTIRCacheEntry* LoadAOTIRCacheEntry(const fextl::string& Name) override;
-  void FetchAOTIRCacheEntry(FEXCore::Core::InternalThreadState* Thread, uintptr_t GuestRIP) override;
+  void FetchAOTIRCacheEntry(uint8_t* AOTImagePtr, uint64_t LoadAddress) override;
   void UnloadAOTIRCacheEntry(FEXCore::IR::AOTIRCacheEntry* Entry) override;
 
   void SetAOTIRLoader(AOTIRLoaderCBFn CacheReader) override {

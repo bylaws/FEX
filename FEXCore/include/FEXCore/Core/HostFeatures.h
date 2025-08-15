@@ -5,7 +5,7 @@
 #include <cstdint>
 
 namespace FEXCore {
-struct FEX_PACKED HostFeatures {
+struct HostFeatures {
   /**
    * @brief Backend features that change how codegen is generated from IR
    *
@@ -46,7 +46,7 @@ struct FEX_PACKED HostFeatures {
   bool SupportsAFP             : 1 {};
   bool SupportsFloatExceptions : 1 {};
 
-  bool Pad : 32 {};
+  uint32_t Pad {};
 
   // Flag if this is InstCountCI
   bool IsInstCountCI {};

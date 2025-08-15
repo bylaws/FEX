@@ -11,15 +11,8 @@ desc: Main glue logic of the arm64 splatter backend
 $end_info$
 */
 
-// flock() is aliased by struct flock, so wrap the latter to disambiguate
 #include "Interface/Core/Frontend.h"
-#include <sys/file.h>
-static int do_flock(int FD, int Op) {
-  return flock(FD, Op);
-}
 
-#include "Common/FDUtils.h"
-#include "Common/FEXServerClient.h"
 #include "Common/SoftFloat.h"
 #include "FEXCore/Utils/Telemetry.h"
 #include "FEXCore/Utils/TypeDefines.h"
@@ -29,6 +22,7 @@ static int do_flock(int FD, int Op) {
 #include "Interface/Core/Dispatcher/Dispatcher.h"
 #include "Interface/Core/JIT/JITClass.h"
 
+#include "Interface/Core/ObjectCache/Relocations.h"
 #include "Interface/IR/Passes/RegisterAllocationPass.h"
 
 #include "Utils/MemberFunctionToPointer.h"
@@ -48,13 +42,6 @@ static int do_flock(int FD, int Op) {
 #include <unistd.h>
 #include <string.h>
 #include <ranges>
-
-extern "C" {
-// nullopt: We haven't requested a CodeDumpFD yet
-// -1: We requested a CodeDumpFD but FEXServer told us not to write any data
-// other values: Code map writing is active
-std::optional<int> CodeDumpFD;
-}
 
 namespace {
 struct DivRem {
@@ -692,8 +679,6 @@ void Arm64JITCore::EmitDetectionString() {
   Align();
 }
 
-std::atomic<uint64_t> TheOff {0};
-
 void Arm64JITCore::ClearCache() {
   // NOTE: Holding on to the reference here is required to ensure validity of the WriteLock mutex
   auto PrevCodeBuffer = CurrentCodeBuffer;
@@ -705,7 +690,6 @@ void Arm64JITCore::ClearCache() {
 
   ThreadState->LookupCache->ChangeGuestToHostMapping(*PrevCodeBuffer, *CurrentCodeBuffer->LookupCache);
 
-  TheOff = CodeBuffers.LatestOffset;
   Relocations.clear();
 }
 
@@ -988,12 +972,15 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
     // This is a ExitFunctionLinkData struct
     Bind(&l_ExitLink);
     dc64(0);                                             // HostCode
-    dc64(PendingJumpThunk.GuestRIP);                     // GuestRIP
+    auto RIPLiteral = InsertGuestRIPLiteral(PendingJumpThunk.GuestRIP);
+    PlaceNamedSymbolLiteral(RIPLiteral); // GuestRIP
     dc64(PendingJumpThunk.CallerAddress - ThunkAddress); // CallerOffset
   }
 
   Bind(&l_ExitLink);
-  dc64(ThreadState->CurrentFrame->Pointers.Common.ExitFunctionLinker);
+  auto LinkerLiteral = InsertNamedSymbolLiteral(RelocNamedSymbolLiteral::NamedSymbol::SYMBOL_LITERAL_EXITFUNCTION_LINKER);
+  PlaceNamedSymbolLiteral(LinkerLiteral); // GuestRIP
+  //dc64(ThreadState->CurrentFrame->Pointers.Common.ExitFunctionLinker);
 
   // CodeSize not including the header or tail data.
   const uint64_t CodeOnlySize = GetCursorAddress<uint8_t*>() - CodeBegin;
@@ -1127,7 +1114,6 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
     SetCursorOffset(CodeBuffers.LatestOffset + TempSize);
 
     CodeBuffers.LatestOffset = GetCursorOffset();
-    TheOff = CodeBuffers.LatestOffset;
   }
 
   TempAllocator.DelayedDisownBuffer();
@@ -1165,50 +1151,6 @@ CPUBackend::CompiledCode Arm64JITCore::CompileCode(uint64_t Entry, uint64_t Size
 
   this->IR = nullptr;
 
-  // TODO: Instead of dumping to a file, we should:
-  // - buffer these writes
-  // - proxy them through FEXServer to avoid IO stalls
-  // - or use io_uring?
-  // TODO: Restore 32-bit support
-  if (CodeDumpFD != -1 && CTX->Config.Is64BitMode) {
-    auto Region = CTX->SyscallHandler->LookupAOTIRCacheEntry(ThreadState, Entry);
-
-    if (Region.Entry && Region.VAFileStart != 0
-      && !Region.Entry->Filename.starts_with("/run/pressure-vessel") /* PV libraries can't yet be read by FEXServer, so skip dumping them */) {
-      auto CodeBufferLock = std::unique_lock {CodeBuffers.CodeBufferWriteMutex}; // TODO: Use a dedicated mutex?
-      if (!CodeDumpFD) {
-        // Query from FEXServer whether this is the first instance of this executable; if it is, also enable code dumping!
-        FEX_CONFIG_OPT(RootFSPath, ROOTFS);
-        auto ProgramName = FEXCore::Config::Get(FEXCore::Config::CONFIG_APP_FILENAME);
-        LOGMAN_THROW_A_FMT(ProgramName && ProgramName.value()->c_str()[0] == '/', "");
-        // Check RootFS first
-        auto ProgramFD = open((RootFSPath() + ProgramName.value()->c_str()).c_str(), O_RDONLY);
-        if (ProgramFD == -1) {
-          ProgramFD = open(ProgramName.value()->c_str(), O_RDONLY);
-        }
-        CodeDumpFD = FEXServerClient::RequestCodeMapFD(FEXServerClient::GetServerFD(), ProgramFD);
-        if (CodeDumpFD != -1) {
-          // Acquire exclusive lock to prevent FEXServer from processing this file eagerly
-          [[maybe_unused]] auto ret = do_flock(CodeDumpFD.value(), LOCK_EX);
-          LOGMAN_THROW_A_FMT(ret == 0, "Could not lock code map");
-
-          // TODO: Recheck if this is needed if FEXServer already sets that flag.
-          auto flags = fcntl(CodeDumpFD.value(), F_GETFD);
-          fcntl(CodeDumpFD.value(), F_SETFD, flags | FD_CLOEXEC);
-        }
-        close(ProgramFD);
-      }
-
-      write(*CodeDumpFD, Region.Entry->Filename.c_str(), Region.Entry->Filename.size() + 1);
-      write(*CodeDumpFD, Region.Entry->FileId.c_str(), Region.Entry->FileId.size() + 1);
-      // TODO: This is the FILE OFFSET, but we actually want the offset in virtual address space...
-      // NOTE: Only the root entrypoint needs to be dumped here, since the rest is statically discoverable from that
-      auto Offset = Entry - Region.VAFileStart;
-      write(*CodeDumpFD, &Offset, sizeof(Offset));
-      write(*CodeDumpFD, &Size, sizeof(Size));
-    }
-  }
-
   return std::move(CodeData);
 }
 
@@ -1226,7 +1168,7 @@ void* Arm64JITCore::RelocateJITObjectCode(uint64_t Entry, std::span<std::byte> H
   memcpy(RelocatedCode, HostCode.data(), HostCode.size_bytes());
 
   // TODO: Use a custom Arm64Emitter to allow inplace patching instead
-  auto success = ApplyRelocations(ForStorage ? 0 : Entry, RelocatedCodeBeginOffset, Relocations, ForStorage);
+  auto success = ApplyRelocations(Entry, RelocatedCodeBeginOffset, Relocations, ForStorage);
   if (!success) {
     ERROR_AND_DIE_FMT("RELOCATION FAILED");
     SetCursorOffset(RelocatedCodeBeginOffset);
@@ -1307,7 +1249,6 @@ void Arm64JITCore::ImportCode(uint64_t NumBytes) {
 
   CursorIncrement(NumBytes);
   CodeBuffers.LatestOffset = GetCursorOffset();
-  TheOff = CodeBuffers.LatestOffset;
 }
 
 fextl::unique_ptr<CPUBackend> CreateArm64JITCore(FEXCore::Context::ContextImpl* ctx, FEXCore::Core::InternalThreadState* Thread) {

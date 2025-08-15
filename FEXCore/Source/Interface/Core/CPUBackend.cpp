@@ -337,7 +337,6 @@ namespace CPU {
     fextl::shared_ptr<CodeBuffer> OldCodeBuffer;
     auto NewCodeBuffer = CodeBuffers.GetLatest();
     if (CurrentCodeBuffer != NewCodeBuffer) {
-      fextl::fmt::print(stderr, "Moving to new CodeBuffer generation in thread {}.{}\n", ::getpid(), ::gettid());
       RegisterForSignalHandler(CurrentCodeBuffer);
       return std::exchange(CurrentCodeBuffer, NewCodeBuffer);
     }

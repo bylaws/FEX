@@ -32,6 +32,7 @@ $end_info$
 #include "Common/Config.h"
 #include "Common/Exception.h"
 #include "Common/TSOHandlerConfig.h"
+#include "Common/ImageTracker.h"
 #include "Common/InvalidationTracker.h"
 #include "Common/OvercommitTracker.h"
 #include "Common/CPUFeatures.h"
@@ -122,6 +123,7 @@ fextl::unique_ptr<FEX::Windows::StatAlloc> StatAllocHandler;
 std::optional<FEX::Windows::InvalidationTracker> InvalidationTracker;
 std::optional<FEX::Windows::CPUFeatures> CPUFeatures;
 std::optional<FEX::Windows::OvercommitTracker> OvercommitTracker;
+std::optional<FEX::Windows::ImageTracker> ImageTracker;
 
 std::mutex ThreadCreationMutex;
 // Map of TIDs to their FEX thread state, `ThreadCreationMutex` must be locked when accessing
@@ -159,10 +161,16 @@ bool IsAddressInJit(uint64_t Address) {
   return Thread->CTX->IsAddressInCodeBuffer(Thread, Address);
 }
 
-void HandleImageMap(uint64_t Address) {
-  fextl::string ModuleName = FEX::Windows::GetSectionFilePath(Address);
+void HandleImageMap(uint64_t Address, bool MainImage = false) {
+  fextl::string ModulePath = FEX::Windows::GetSectionFilePath(Address);
+  fextl::string ModuleName = fextl::string{FEX::Windows::BaseName(ModulePath)};
   LogMan::Msg::DFmt("Load module {}: {:X}", ModuleName, Address);
   InvalidationTracker->HandleImageMap(ModuleName, Address);
+  ImageTracker->HandleImageMap(ModulePath, Address, MainImage);
+}
+
+void HandleImageUnmap(uint64_t Address, uint64_t Size) {
+  ImageTracker->HandleImageUnmap(Address);
 }
 } // namespace
 
@@ -457,6 +465,10 @@ public:
     InvalidationTracker->InvalidateAlignedInterval(Start, Length, false);
   }
 
+  void MarkGuestBlockEntry(FEXCore::Core::InternalThreadState* Thread, uint64_t Entry) override {
+    ImageTracker->MarkGuestBlockEntry(Entry);
+  }
+
   void MarkOvercommitRange(uint64_t Start, uint64_t Length) override {
     OvercommitTracker->MarkRange(Start, Length);
   }
@@ -503,17 +515,19 @@ void BTCpuProcessInit() {
     CTX = FEXCore::Context::Context::CreateNewContext(HostFeatures);
   }
 
+
   CTX->SetSignalDelegator(SignalDelegator.get());
   CTX->SetSyscallHandler(SyscallHandler.get());
   CTX->InitCore();
   Context::HandlerConfig.emplace(*CTX);
   InvalidationTracker.emplace(*CTX, Threads);
+  ImageTracker.emplace(*CTX);
+
+  auto MainModule = reinterpret_cast<__TEB*>(NtCurrentTeb())->Peb->ImageBaseAddress;
+  HandleImageMap(reinterpret_cast<uint64_t>(MainModule), true);
 
   auto NtDllX86 = reinterpret_cast<SYSTEM_DLL_INIT_BLOCK*>(GetProcAddress(NtDll, "LdrSystemDllInitBlock"))->ntdll_handle;
   HandleImageMap(NtDllX86);
-
-  auto MainModule = reinterpret_cast<__TEB*>(NtCurrentTeb())->Peb->ImageBaseAddress;
-  HandleImageMap(reinterpret_cast<uint64_t>(MainModule));
 
   CPUFeatures.emplace(*CTX);
 
@@ -949,7 +963,10 @@ NTSTATUS BTCpuNotifyMapViewOfSection(void* Unk1, void* Address, void* Unk2, SIZE
 void BTCpuNotifyUnmapViewOfSection(void* Address, BOOL After, ULONG Status) {
   if (!After) {
     ThreadCreationMutex.lock();
-    InvalidationTracker->InvalidateContainingSection(reinterpret_cast<uint64_t>(Address), true);
+    auto [Start, Size] = InvalidationTracker->InvalidateContainingSection(reinterpret_cast<uint64_t>(Address), true);
+    if (Size) {
+      HandleImageUnmap(Start, Size);
+    }
   } else {
     ThreadCreationMutex.unlock();
   }
