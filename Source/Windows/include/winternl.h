@@ -457,6 +457,8 @@ typedef enum _MEMORY_INFORMATION_CLASS {
   MemoryFexStatsShm = 2000,
 } MEMORY_INFORMATION_CLASS;
 
+#define SystemEmulationBasicInformation (SYSTEM_INFORMATION_CLASS)62
+
 #define ProcessFexHardwareTso (PROCESSINFOCLASS)2000
 #define ProcessFexUnalignAtomic (PROCESSINFOCLASS)2001
 
