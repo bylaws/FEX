@@ -639,7 +639,6 @@ void Arm64Emitter::FillSpecialRegs(ARMEmitter::Register TmpReg, ARMEmitter::Regi
       bfxil(ARMEmitter::Size::i64Bit, TmpReg, TmpReg2, 6, 1);
     }
 
-    msr(ARMEmitter::SystemRegister::FPCR, TmpReg);
   }
 #endif
 
