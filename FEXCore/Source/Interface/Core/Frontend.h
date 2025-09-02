@@ -86,9 +86,14 @@ private:
   bool DecodeInstructionImpl(uint64_t PC);
   DecodedBlockStatus DecodeInstruction(uint64_t PC);
 
-  void BranchTargetInMultiblockRange();
+  bool ValidateMultiblockTarget(uint64_t TargetRIP);
+  
+  void BranchTargetInMultiblockRange(uint64_t TotalInstructions);
   bool IsBranchMonoTailcall(uint64_t NumInstructions) const;
   bool InstCanContinue() const;
+  
+  // Jump table recognition
+  bool RecognizeMSVCJumpTable(uint64_t TotalInstructions);
 
   void AddBranchTarget(uint64_t Target);
 

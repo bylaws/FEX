@@ -1065,11 +1065,20 @@ Decoder::DecodedBlockStatus Decoder::DecodeInstruction(uint64_t PC) {
   return DecodedBlockStatus::SUCCESS;
 }
 
-void Decoder::BranchTargetInMultiblockRange() {
+bool Decoder::ValidateMultiblockTarget(uint64_t TargetRIP) {
+  bool ValidMultiblockMember = TargetRIP >= SymbolMinAddress && TargetRIP < SymbolMaxAddress;
+
+#ifdef _M_ARM_64EC
+  ValidMultiblockMember = ValidMultiblockMember && !RtlIsEcCode(TargetRIP);
+#endif
+
+  return ValidMultiblockMember;
+}
+
+void Decoder::BranchTargetInMultiblockRange(uint64_t TotalInstructions) {
   if (!CTX->Config.Multiblock) {
     return;
   }
-
   // If the RIP setting is conditional AND within our symbol range then it can be considered for multiblock
   uint64_t TargetRIP = 0;
   const auto GPRSize = GetGPROpSize();
@@ -1090,7 +1099,7 @@ void Decoder::BranchTargetInMultiblockRange() {
   }
 
   // Calls are handled above
-  switch (DecodeInst->OP) {
+  switch (DecodeInst->OPRaw) {
   case 0x70 ... 0x7F:   // Conditional JUMP
   case 0x80 ... 0x8F: { // More conditional
     // Source is a literal
@@ -1107,6 +1116,10 @@ void Decoder::BranchTargetInMultiblockRange() {
     break;
   case 0xC2: // RET imm
   case 0xC3: // RET
+    return;
+  case 0xFF: // Indirect jump - check for MSVC jump table pattern
+    RecognizeMSVCJumpTable(TotalInstructions);
+    return; // Regular indirect jump, can't predict target
   default: return; break;
   }
 
@@ -1124,13 +1137,7 @@ void Decoder::BranchTargetInMultiblockRange() {
   // Forbid distant branches to have the cost code better match the guest code layout, avoiding massive (range-wise) code
   // blocks in highly fragmented guest code. Such branches are often not-taken branches to garbage in obfuscated code.
   constexpr uint64_t MAX_FORWARD_BRANCH_DIST = FEXCore::Utils::FEX_PAGE_SIZE * 4;
-  bool ValidMultiblockMember = TargetRIP >= SymbolMinAddress && TargetRIP < std::min(InstEnd + MAX_FORWARD_BRANCH_DIST, SymbolMaxAddress);
-
-#ifdef _M_ARM_64EC
-  ValidMultiblockMember = ValidMultiblockMember && !RtlIsEcCode(TargetRIP);
-#endif
-
-  if (ValidMultiblockMember) {
+  if (TargetRIP < InstEnd + MAX_FORWARD_BRANCH_DIST && ValidateMultiblockTarget(TargetRIP)) {
     // Update our conditional branch ranges before we return
     if (Conditional) {
       MaxCondBranchForward = std::max(MaxCondBranchForward, TargetRIP);
@@ -1228,6 +1235,95 @@ bool Decoder::InstCanContinue() const {
     }
   }
 
+  return false;
+}
+
+bool Decoder::RecognizeMSVCJumpTable(uint64_t TotalInstructions) {
+  // This very roughly matches the MSVC jump table pattern, enough to avoid false positives in normal cases. 
+  // If there are false positives, the code is tolerant of the and worst case this will cause garbage code to be
+  // explored.
+  if (!CTX->Config.Multiblock) {
+    return false;
+  }
+
+  if (TotalInstructions < 6) {
+    return false;
+  }
+    
+  FEXCore::X86Tables::ModRMDecoded ModRM;
+  ModRM.Hex = DecodeInst->ModRM;
+
+  if (DecodeInst->OPRaw != 0xFF || ModRM.reg != 4 || !DecodeInst->Src[0].IsGPR()) {
+    return false;
+  }
+  
+  auto AddInst = std::prev(DecodeInst);
+  auto MovInst = std::prev(AddInst);
+  
+  if (AddInst->OP != 0x03 && AddInst->OP != 0x01) {
+    return false;
+  }
+
+  if (MovInst->OP != 0x8B || !MovInst->Src[0].IsSIB() || MovInst->Src[0].Data.SIB.Scale != 4) {
+    return false;
+  }
+  uint64_t RemainingInsts = TotalInstructions - 4;
+
+  auto ValidateLea = [](auto Inst) { return Inst->OP == 0x8D && Inst->Src[0].IsRIPRelative(); };
+  auto LeaInst = std::prev(MovInst);
+  for (size_t i = 0; !ValidateLea(LeaInst) && i < std::min(12ULL, RemainingInsts); i++, LeaInst--);
+  if (!ValidateLea(LeaInst)) return false;
+  
+  auto ValidateJa = [](auto Inst) { return Inst->OP == 0x77 || Inst->OP == 0x87; };
+  auto JaInst = std::prev(MovInst);
+  for (size_t i = 0; !ValidateJa(JaInst) && i < std::min(12ULL, RemainingInsts - 1); i++, JaInst--);
+  if (!ValidateJa(JaInst)) return false;
+
+  auto CmpInst = std::prev(JaInst);
+  FEXCore::X86Tables::ModRMDecoded CmpModRM;
+  CmpModRM.Hex = CmpInst->ModRM;
+  if ((CmpInst->OPRaw != 0x83 || CmpModRM.reg != 0x7) &&
+      (CmpInst->OPRaw != 0x81 && CmpModRM.reg != 0x7) &&
+      CmpInst->OP != 0x3D) {
+    return false;
+  }
+
+  uint64_t DefaultCaseTargetAddr = JaInst->PC + JaInst->InstSize + JaInst->Src[0].Literal();
+  if (ValidateMultiblockTarget(DefaultCaseTargetAddr)) {
+    AddBranchTarget(DefaultCaseTargetAddr);
+  }
+
+  uint64_t TableEntryCount; 
+
+  if (CmpInst->Src[0].IsLiteral()) {
+    TableEntryCount = CmpInst->Src[0].Literal();
+  } else {
+    TableEntryCount = CmpInst->Src[1].Literal();
+  }
+            
+  uint64_t ImageBase = LeaInst->PC + LeaInst->InstSize + static_cast<int64_t>(LeaInst->Src[0].Data.RIPLiteral.Value.s);
+  uint64_t TableBase = ImageBase + MovInst->Src[0].Data.SIB.Offset;
+  // MSVC places jump tables in .text, so this is fine as a check to see if the jump table is readable
+  if (!CheckRangeExecutable(TableBase, TableEntryCount * sizeof(uint32_t))) {
+    return false;
+  }
+
+  for (uint64_t i = 0; i < TableEntryCount; i++) {
+    uint64_t EntryAddr = TableBase + i * 4;
+    uint32_t RVA = 0;
+    
+    // Read the RVA from the jump table and add to the image base to get the target address
+    const uint8_t* TablePtr = AdjustAddrForSpecialRegion(InstStream, DecodeInst->PC, EntryAddr);
+    std::memcpy(&RVA, TablePtr, 4);
+    
+    uint64_t TargetAddr = ImageBase + RVA;
+
+    if (ValidateMultiblockTarget(TargetAddr)) {
+      AddBranchTarget(TargetAddr);
+      BlockInfo.EntryPoints.emplace(TargetAddr);
+    }
+  }
+  
   return false;
 }
 
@@ -1460,7 +1556,7 @@ void Decoder::DecodeInstructionsAtEntry(FEXCore::Core::InternalThreadState *Thre
           // We don't want to short circuit this since we want to calculate our ranges still
           // NOTE: This will invalidate BlockIt, this is fine as we immediately break from the loop and EraseBlock cannot be true
           BlockIt->ForceFullSMCDetection = CTX->AreMonoHacksActive() && IsBranchMonoTailcall(BlockIt->NumInstructions);
-          BranchTargetInMultiblockRange();
+          BranchTargetInMultiblockRange(TotalInstructions);
         }
 
         break;
