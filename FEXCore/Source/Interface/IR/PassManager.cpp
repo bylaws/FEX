@@ -86,7 +86,6 @@ void PassManager::InsertRegisterAllocationPass(FEXCore::Context::ContextImpl* ct
 }
 
 void PassManager::Run(IREmitter* IREmit) {
-  FEXCORE_PROFILE_SCOPED("PassManager::Run");
 
   for (const auto& Pass : Passes) {
     Pass->Run(IREmit);

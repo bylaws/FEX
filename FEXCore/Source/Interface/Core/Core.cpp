@@ -489,7 +489,6 @@ static void IRDumper(FEXCore::Core::InternalThreadState* Thread, IR::IREmitter* 
 
 ContextImpl::GenerateIRResult
 ContextImpl::GenerateIR(FEXCore::Core::InternalThreadState* Thread, uint64_t GuestRIP, bool ExtendedDebugInfo, uint64_t MaxInst) {
-  FEXCORE_PROFILE_SCOPED("GenerateIR");
 
   Thread->OpDispatcher->ReownOrClaimBuffer();
   Thread->OpDispatcher->ResetWorkingList();

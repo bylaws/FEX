@@ -706,7 +706,6 @@ Ref X87StackOptimization::SynchronizeStackValues() {
 }
 
 void X87StackOptimization::Run(IREmitter* Emit) {
-  FEXCORE_PROFILE_SCOPED("PassManager::x87StackOpt");
 
   auto CurrentIR = Emit->ViewIR();
   auto* HeaderOp = CurrentIR.GetHeader();

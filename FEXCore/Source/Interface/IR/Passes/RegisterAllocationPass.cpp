@@ -564,7 +564,6 @@ bool ConstrainedRAPass::TryPostRAMerge(Ref LastNode, Ref CodeNode, IROp_Header* 
 }
 
 void ConstrainedRAPass::Run(IREmitter* IREmit_) {
-  FEXCORE_PROFILE_SCOPED("PassManager::RA");
 
   IREmit = IREmit_;
   auto IR_ = IREmit->ViewIR();

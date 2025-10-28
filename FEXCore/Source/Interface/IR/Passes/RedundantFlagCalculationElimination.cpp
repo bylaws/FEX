@@ -680,7 +680,6 @@ void DeadFlagCalculationEliminination::OptimizeParity(IREmitter* IREmit, IRListV
 }
 
 void DeadFlagCalculationEliminination::Run(IREmitter* IREmit) {
-  FEXCORE_PROFILE_SCOPED("PassManager::DFE");
 
   auto CurrentIR = IREmit->ViewIR();
   fextl::deque<uint32_t> Worklist;

@@ -33,7 +33,6 @@ IRValidation::~IRValidation() {
 }
 
 void IRValidation::Run(IREmitter* IREmit) {
-  FEXCORE_PROFILE_SCOPED("PassManager::IRValidation");
 
   bool HadError = false;
   bool HadWarning = false;

@@ -47,41 +47,53 @@ static inline uint64_t GetTime() {
 
 #endif
 
-namespace FEXCore::Profiler {
-ProfilerBlock::ProfilerBlock(const std::string_view Format)
-  : DurationBegin {GetTime()}
-  , Format {Format} {}
-
-ProfilerBlock::~ProfilerBlock() {
-  auto Duration = GetTime() - DurationBegin;
-  TraceObject(Format, Duration);
-}
-} // namespace FEXCore::Profiler
-
 namespace GPUVis {
 // ftrace FD for writing trace data.
 // Needs to be a raw FD since we hold this open for the entire application execution.
 static int TraceFD {-1};
+}
 
+namespace FEXCore::Profiler {
+ProfilerBlock::ProfilerBlock(const std::string_view Format)
+  : DurationBegin {GetTime()}
+  , Format {Format} {
+    if (GPUVis::TraceFD != -1) {
+    // Print the duration as something that began negative duration ago
+    const auto StringSize = Format.size() + 22;
+    auto Event = reinterpret_cast<char*>(alloca(StringSize));
+    auto Res = ::fmt::format_to_n(Event, StringSize, "B|{}|{}\n", GetCurrentThreadId(), Format);
+    write(GPUVis::TraceFD, Event, Res.size);
+  }
+}
+
+ProfilerBlock::~ProfilerBlock() {
+    if (GPUVis::TraceFD != -1) {
+    // Print the duration as something that began negative duration ago
+    const auto StringSize = 22;
+    auto Event = reinterpret_cast<char*>(alloca(StringSize));
+    auto Res = ::fmt::format_to_n(Event, StringSize, "E|{}\n", GetCurrentThreadId());
+    write(GPUVis::TraceFD, Event, Res.size);
+  }
+}
+} // namespace FEXCore::Profiler
+
+namespace GPUVis {
 // Need to search the paths to find the real trace path
 static std::array<const char*, 2> TraceFSDirectories {
-  "/sys/kernel/tracing",
-  "/sys/kernel/debug/tracing",
+  "Z:\\sys\\kernel\\tracing",
+  "Z:\\sys\\kernel\\debug\\tracing",
 };
 
 void Init() {
-  FEX_CONFIG_OPT(EnableGpuvisProfiling, ENABLEGPUVISPROFILING);
-  if (!EnableGpuvisProfiling()) {
-    return;
-  }
   for (auto Path : TraceFSDirectories) {
 #ifdef _WIN32
     constexpr auto flags = O_WRONLY;
 #else
     constexpr auto flags = O_WRONLY | O_CLOEXEC;
 #endif
-    fextl::string FilePath = fextl::fmt::format("{}/trace_marker", Path);
-    TraceFD = open(FilePath.c_str(), flags);
+    fextl::string FilePath = fextl::fmt::format("{}\\trace_marker", Path);
+    TraceFD = open(FilePath.c_str(), O_WRONLY);
+    LogMan::Msg::EFmt("aa {} {}", TraceFD, FilePath);
     if (TraceFD != -1) {
       // Opened TraceFD, early exit
       break;
@@ -97,22 +109,10 @@ void Shutdown() {
 }
 
 void TraceObject(const std::string_view Format, uint64_t Duration) {
-  if (TraceFD != -1) {
-    // Print the duration as something that began negative duration ago
-    const auto StringSize = Format.size() + strlen(" (lduration=-)\n") + 22;
-    auto Event = reinterpret_cast<char*>(alloca(StringSize));
-    auto Res = ::fmt::format_to_n(Event, StringSize, "{} (lduration=-{})\n", Format, Duration);
-    write(TraceFD, Event, Res.size);
-  }
+
 }
 
 void TraceObject(const std::string_view Format) {
-  if (TraceFD != -1) {
-    const auto StringSize = Format.size() + 1;
-    auto Event = reinterpret_cast<char*>(alloca(StringSize));
-    auto Res = ::fmt::format_to_n(Event, StringSize, "{}\n", Format);
-    write(TraceFD, Event, Res.size);
-  }
 }
 } // namespace GPUVis
 #elif FEXCORE_PROFILER_BACKEND == FEXCORE_PROFILER_BACKEND_TRACY
