@@ -55,33 +55,214 @@ static void LoadImageVolatileMetadata(fextl::set<uint64_t>& VolatileInstructions
   }
 }
 
+static fextl::unordered_map<uint32_t, FEXCore::GuestRelocationType> LoadImageRelocations(ArchImageNtHeaders* Nt, uint64_t Address) {
+  const auto Module = reinterpret_cast<HMODULE>(Address);
+  ULONG Size;
+
+  const auto RelocationBlocksBegin =
+    reinterpret_cast<uint64_t>(RtlImageDirectoryEntryToData(Module, true, IMAGE_DIRECTORY_ENTRY_BASERELOC, &Size));
+
+  fextl::unordered_map<uint32_t, FEXCore::GuestRelocationType> Result;
+  const uint64_t RelocationBlocksEnd = RelocationBlocksBegin + Size - sizeof(IMAGE_BASE_RELOCATION);
+  for (uint64_t CurrentRelocation = RelocationBlocksBegin; CurrentRelocation < RelocationBlocksEnd;) {
+    const auto* Block = reinterpret_cast<IMAGE_BASE_RELOCATION*>(CurrentRelocation);
+    if (!Block->SizeOfBlock) {
+      break;
+    }
+    const uint64_t BlockEnd = CurrentRelocation + Block->SizeOfBlock; // Includes the size of IMAGE_BASE_RELOCATION
+    CurrentRelocation += sizeof(IMAGE_BASE_RELOCATION);
+
+    for (; CurrentRelocation < BlockEnd; CurrentRelocation += 2) {
+      auto PackedRelocation = *reinterpret_cast<uint16_t*>(CurrentRelocation);
+      uint32_t RelocatedRVA = Block->VirtualAddress + (PackedRelocation & 0xfff);
+      uint8_t Type = PackedRelocation >> 12;
+
+      switch (Type) {
+      case IMAGE_REL_BASED_ABSOLUTE: break;
+      case IMAGE_REL_BASED_HIGHLOW: Result[RelocatedRVA] = FEXCore::GuestRelocationType::Rel32; break;
+      case IMAGE_REL_BASED_DIR64: Result[RelocatedRVA] = FEXCore::GuestRelocationType::Rel64; break;
+      default: ERROR_AND_DIE_FMT("Unhandled relocation");
+      }
+    }
+  }
+
+  return Result;
+}
+
 ImageTracker::ImageTracker(FEXCore::Context::Context& CTX)
   : CTX {CTX}
   , ExtendedMetaData {FEX::VolatileMetadata::ParseExtendedVolatileMetadata(ExtendedVolatileMetadataConfig())} {}
 
-void ImageTracker::HandleImageMap(std::string_view Path, uint64_t Address, bool MainImage) {
-  fextl::string ModuleName {BaseName(Path)};
-  LogMan::Msg::DFmt("Load module {}: {:X}", ModuleName, Address);
+static fextl::string ToLower(std::string_view String) {
+  fextl::string Res;
+  Res.resize(String.size());
+  std::transform(String.begin(), String.end(), Res.begin(), [](unsigned char c){ return std::tolower(c);});
+  return Res;
+}
+
+ImageTracker::MappedImageInfo::MappedImageInfo(std::string_view Path, uint64_t Address,
+          ArchImageNtHeaders* Nt,  fextl::unordered_map<uint32_t, FEXCore::GuestRelocationType> Relocations)
+  : Info {.FileId = (static_cast<uint64_t>(Nt->FileHeader.TimeDateStamp) << 32) | Nt->OptionalHeader.SizeOfImage,
+          .FilePath = ToLower(Path), // Normalize path case as Windows paths are case-insensitive
+          .Relocations = std::move(Relocations)}
+  , SectionInfo {.FileInfo = Info, .FileStartVA = Address, .BeginVA = Address, .EndVA = Address + Nt->OptionalHeader.SizeOfImage} {}
+
+FEXCore::ExecutableFileSectionInfo ImageTracker::HandleImageMap(std::string_view Path, uint64_t Address, bool MainImage) {
+  std::scoped_lock Lock(CTX.GetCodeInvalidationMutex());
 
   const auto Module = reinterpret_cast<HMODULE>(Address);
   auto* Nt = reinterpret_cast<ArchImageNtHeaders*>(RtlImageNtHeader(Module));
+  MappedImageInfo* ImageInfo = nullptr;
+  {
+    auto Relocations = [&]() {
+      if (CTX.GetCodeCache().IsGeneratingCache) {
+        return LoadImageRelocations(Nt, Address);
+      }
+      return {};
+    }();
+    std::unique_lock Lk {ImagesLock};
+    auto [It, Inserted] = MappedImages.emplace(std::piecewise_construct, std::forward_as_tuple(Address), std::forward_as_tuple(Path, Address, Nt, std::move(Relocations)));
+
+    if (!Inserted) {
+      return It->second.SectionInfo;
+    }
+
+    ImageInfo = &It->second;
+  }
+
+  auto ID = FEXCore::CodeMap::GetBaseFilename(ImageInfo->Info, false);
+
+  if (FEXCore::Config::Get_ENABLECODECACHINGWIP() && !CTX.GetCodeCache().IsGeneratingCache) {
+    if (MainImage) {
+      LARGE_INTEGER Time;
+      NtQuerySystemTime(&Time);
+      ActiveCodeMapPath = fmt::format("{}codemap\\new\\{}.{}.bin", FEX::Config::GetCacheDirectory(), ID, Time.QuadPart);
+
+      auto Writer = fextl::make_unique<FEXCore::CodeMapWriter>(*this, false);
+      Writer->AppendSetMainExecutable(ImageInfo->Info);
+      CTX.SetCodeMapWriter(std::move(Writer));
+      LoadAOTBundle(*ImageInfo);
+    }
+
+    auto AOTImage = AOTImages.find(ID);
+    if (AOTImage != AOTImages.end()) {
+      CTX.GetCodeCache().LoadData(nullptr, AOTImage->second.Data, ImageInfo->SectionInfo);
+    }
+  }
+
   uint64_t EndAddress = Address + Nt->OptionalHeader.SizeOfImage;
   fextl::set<uint64_t> VolatileInstructions {};
   FEXCore::IntervalList<uint64_t> VolatileValidRanges {};
   LoadImageVolatileMetadata(VolatileInstructions, VolatileValidRanges, Module, Nt, Address, EndAddress);
-  if (auto It = ExtendedMetaData.find(ModuleName); It != ExtendedMetaData.end()) {
+  if (auto It = ExtendedMetaData.find(ID); It != ExtendedMetaData.end()) {
     FEX::VolatileMetadata::ApplyFEXExtendedVolatileMetadata(It->second, VolatileInstructions, VolatileValidRanges, Address, EndAddress);
   }
 
   if (!VolatileInstructions.empty() || !VolatileValidRanges.Empty()) {
     LogMan::Msg::DFmt("Loaded volatile metadata for {:X}: {} entries", Address, VolatileInstructions.size());
-    std::scoped_lock Lock(CTX.GetCodeInvalidationMutex());
     CTX.AddForceTSOInformation(VolatileValidRanges, std::move(VolatileInstructions));
   }
+
+  return ImageInfo->SectionInfo;
 }
 
 void ImageTracker::HandleImageUnmap(uint64_t Address, uint64_t Size) {
   std::scoped_lock Lock(CTX.GetCodeInvalidationMutex());
   CTX.RemoveForceTSOInformation(Address, Size);
+
+  std::unique_lock Lk {ImagesLock};
+  MappedImages.erase(Address);
+}
+
+std::optional<FEXCore::ExecutableFileSectionInfo> ImageTracker::LookupExecutableFileSection(uint64_t Address) {
+  std::shared_lock Lk {ImagesLock};
+  auto It = MappedImages.upper_bound(Address);
+  if (It == MappedImages.begin() || std::prev(It)->second.SectionInfo.EndVA <= Address) {
+    return {};
+  }
+  return std::prev(It)->second.SectionInfo;
+}
+
+int ImageTracker::OpenCodeMapFile() {
+  if (ActiveCodeMapPath.empty()) {
+    return -1;
+  }
+  return _sopen(ActiveCodeMapPath.c_str(), O_CREAT | O_TRUNC | O_WRONLY | O_APPEND, _SH_DENYRW, 0644);
+}
+
+void ImageTracker::LoadAOTBundle(MappedImageInfo& ImageInfo) {
+  std::string AnsiPath = fmt::format("\\??\\{}cache\\{}", FEX::Config::GetCacheDirectory(),
+                                                     FEXCore::CodeMap::GetBaseFilename(ImageInfo.Info, false));
+  ScopedUnicodeString NtPath(AnsiPath.c_str());
+
+  OBJECT_ATTRIBUTES DirAttr;
+  InitializeObjectAttributes(&DirAttr, &*NtPath, OBJ_CASE_INSENSITIVE, NULL, NULL);
+
+  ScopedHandle DirHandle;
+  IO_STATUS_BLOCK IOSB;
+
+  if (!NT_SUCCESS(NtOpenFile(&*DirHandle, FILE_LIST_DIRECTORY | SYNCHRONIZE, &DirAttr, &IOSB, FILE_SHARE_READ | FILE_SHARE_WRITE,
+                             FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT))) {
+    return;
+  }
+
+  std::array<uint8_t, 0x1000> DirBuffer;
+  bool FirstScan = true;
+  auto QueryDir = [&]() {
+    NTSTATUS Status = NtQueryDirectoryFile(*DirHandle, nullptr, nullptr, nullptr, &IOSB, DirBuffer.data(), DirBuffer.size(),
+                                           FileBothDirectoryInformation, FALSE, nullptr, FirstScan);
+    if (FirstScan) {
+      FirstScan = false;
+    }
+    return NT_SUCCESS(Status);
+  };
+
+  while (QueryDir()) {
+    auto* Info = reinterpret_cast<PFILE_BOTH_DIRECTORY_INFORMATION>(DirBuffer.data());
+
+    while (true) {
+      UNICODE_STRING CurrentFileName;
+      CurrentFileName.Buffer = Info->FileName;
+      CurrentFileName.Length = static_cast<USHORT>(Info->FileNameLength);
+      CurrentFileName.MaximumLength = CurrentFileName.Length;
+
+      bool Skip = (Info->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) || (Info->FileNameLength == 2 && Info->FileName[0] == '.') ||
+                  (Info->FileNameLength == 4 && Info->FileName[0] == '.' && Info->FileName[1] == '.');
+
+      if (!Skip) {
+        OBJECT_ATTRIBUTES FileAttr;
+        InitializeObjectAttributes(&FileAttr, &CurrentFileName, OBJ_CASE_INSENSITIVE, *DirHandle, nullptr);
+
+        ScopedHandle FileHandle;
+        if (NT_SUCCESS(NtOpenFile(&*FileHandle, GENERIC_READ | SYNCHRONIZE, &FileAttr, &IOSB, FILE_SHARE_READ, FILE_SYNCHRONOUS_IO_NONALERT))) {
+
+          ScopedHandle SectionHandle;
+          if (NT_SUCCESS(NtCreateSection(&*SectionHandle, SECTION_MAP_EXECUTE | SECTION_MAP_READ, nullptr, nullptr, PAGE_EXECUTE_READ,
+                                         SEC_COMMIT, *FileHandle))) {
+
+            void* LoadAddress = nullptr;
+            SIZE_T MappedSize = 0;
+            if (NT_SUCCESS(NtMapViewOfSection(*SectionHandle, NtCurrentProcess(), &LoadAddress, 0, 0, nullptr, &MappedSize, ViewUnmap,
+                                              MEM_RESERVE | MEM_TOP_DOWN, PAGE_EXECUTE_READ))) {
+
+              fextl::string UniqueId;
+              ULONG AnsiLength = 0;
+              RtlUnicodeToMultiByteSize(&AnsiLength, Info->FileName, Info->FileNameLength);
+              UniqueId.resize(AnsiLength);
+              RtlUnicodeToMultiByteN(UniqueId.data(), AnsiLength, NULL, Info->FileName, Info->FileNameLength);
+
+              AOTImages[UniqueId] = {.Data = static_cast<std::byte*>(LoadAddress)};
+              LogMan::Msg::EFmt("Loaded cache: {}", UniqueId);
+            }
+          }
+        }
+      }
+
+      if (Info->NextEntryOffset == 0) {
+        break;
+      }
+      Info = reinterpret_cast<PFILE_BOTH_DIRECTORY_INFORMATION>(reinterpret_cast<uint8_t*>(Info) + Info->NextEntryOffset);
+    }
+  }
 }
 } // namespace FEX::Windows
