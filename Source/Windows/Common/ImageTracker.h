@@ -68,6 +68,7 @@ private:
 
   std::shared_mutex ImagesLock;
   std::map<uint64_t, MappedImageInfo> MappedImages;
+  std::map<fextl::string, AOTImageInfo> AOTImages;
 
   std::string ActiveCodeMapPath;
   bool IsGeneratingCache;
