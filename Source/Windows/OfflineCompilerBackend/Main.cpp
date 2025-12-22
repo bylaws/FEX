@@ -35,6 +35,8 @@
 #include "Common/Module.h"
 #include "Common/OvercommitTracker.h"
 #include "Common/PortabilityInfo.h"
+
+#include "SteamStub.h"
 #include "DummyHandlers.h"
 
 namespace {
@@ -183,8 +185,14 @@ struct MappedImage {
   ImageInfo Info;
 };
 
-std::vector<MappedImage> TryMapImages(std::unordered_map<FEXCore::CodeMapFileId, ImageInfo>&& Images) {
+struct TryMapImagesResult {
   std::vector<MappedImage> MappedImages;
+  bool SteamStubPresent {};
+};
+
+TryMapImagesResult
+TryMapImages(std::unordered_map<FEXCore::CodeMapFileId, ImageInfo>&& Images) {
+  TryMapImagesResult Result;
 
   for (auto& [ID, Info] : Images) {
     if (!Info.RecompileCode || Info.Contents.Blocks.empty()) {
@@ -221,10 +229,18 @@ std::vector<MappedImage> TryMapImages(std::unordered_map<FEXCore::CodeMapFileId,
     InvalidationTracker->HandleImageMap(FEX::Windows::BaseName(Info.Contents.Filename), BaseAddress);
     auto SectionInfo = ImageTracker->HandleImageMap(Info.Contents.Filename, BaseAddress, Info.Contents.IsExecutable);
 
-    MappedImages.push_back(MappedImage {.BaseAddress = BaseAddress, .SectionInfo = SectionInfo, .Info = std::move(Info)});
+    auto Res = FEX::Windows::TryDecryptSteamStubIfPresent(BaseAddress);
+    if (Res == FEX::Windows::TryDecryptSteamStubResult::DecryptFailure) {
+      LogMan::Msg::EFmt("Unsupported SteamStub!");
+      continue;
+    } else if (Res == FEX::Windows::TryDecryptSteamStubResult::DecryptSuccess) {
+      Result.SteamStubPresent = true;
+    }
+
+    Result.MappedImages.push_back(MappedImage {.BaseAddress = BaseAddress, .SectionInfo = SectionInfo, .Info = std::move(Info)});
   }
 
-  return MappedImages;
+  return Result;
 }
 
 } // namespace
@@ -358,7 +374,7 @@ int main(int argc, char** argv) {
   ImageTracker.emplace(*CTX, true);
 
   // Images that don't need recompile will be filtered out here
-  auto MappedImages = TryMapImages(std::move(Images));
+  auto [MappedImages, IsSteamStubPresent] = TryMapImages(std::move(Images));
 
   auto* Thread = CTX->CreateThread(0, 0);
   auto Frame = Thread->CurrentFrame;

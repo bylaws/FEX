@@ -3,7 +3,7 @@ if (_M_ARM_64EC)
 elseif (_M_ARM_64)
   set(TARGET_NAME FEXOfflineCompilerBackendWOW64)
 endif()
-add_executable(${TARGET_NAME} Main.cpp $<TARGET_OBJECTS:FEXCore_object>)
+add_executable(${TARGET_NAME} Main.cpp SteamStub.cpp $<TARGET_OBJECTS:FEXCore_object>)
 patch_library_wine(${TARGET_NAME})
 
 target_include_directories(${TARGET_NAME} PRIVATE
@@ -19,6 +19,7 @@ target_link_libraries(${TARGET_NAME}
   CommonTools
   JemallocLibs
   CommonWindows
+  bcrypt
   ntdll_ex
 )
 
