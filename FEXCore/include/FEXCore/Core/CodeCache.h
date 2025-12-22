@@ -7,7 +7,7 @@
 #include <FEXCore/fextl/set.h>
 #include <FEXCore/fextl/string.h>
 #include <FEXCore/fextl/vector.h>
-#include <FEXCore/fextl/unordered_map.h>
+#include <FEXCore/fextl/robin_map.h>
 #include <FEXCore/HLE/SourcecodeResolver.h>
 
 #include <atomic>
@@ -41,7 +41,7 @@ struct ExecutableFileInfo {
   fextl::unique_ptr<HLE::SourcecodeMap> SourcecodeMap;
   uint64_t FileId = 0;
   fextl::string Filename;
-  fextl::unordered_map<uint32_t, GuestRelocationType> Relocations;
+  fextl::robin_map<uint32_t, GuestRelocationType> Relocations;
 };
 
 // Information associated with a specific section of an executable file
