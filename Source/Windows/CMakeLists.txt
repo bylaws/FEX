@@ -32,6 +32,7 @@ if (_M_ARM_64EC)
   add_subdirectory(ARM64EC)
 elseif (_M_ARM_64)
   add_subdirectory(WOW64)
+  add_subdirectory(OfflineCompiler)
 endif()
 
 add_subdirectory(OfflineCompilerBackend)
