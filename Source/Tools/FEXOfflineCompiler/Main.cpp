@@ -36,7 +36,7 @@ public:
   uintptr_t VAFileStart = 0;
 
   // These are no-ops implementations of the SyscallHandler API
-  std::optional<FEXCore::ExecutableFileSectionInfo> LookupExecutableFileSection(FEXCore::Core::InternalThreadState&, uint64_t) override {
+  std::optional<FEXCore::ExecutableFileSectionInfo> LookupExecutableFileSection(FEXCore::Core::InternalThreadState*, uint64_t) override {
     return FEXCore::ExecutableFileSectionInfo {FileInfo, VAFileStart};
   }
 
@@ -174,7 +174,7 @@ GenerateSingleCache(const FEXCore::ExecutableFileInfo& Binary, fextl::set<uintpt
     auto FilenameNew = Filename + ".new";
     int fd = open(FilenameNew.c_str(), O_CREAT | O_WRONLY, 0644);
     {
-      auto Entry = SyscallHandler->LookupExecutableFileSection(*Thread, Loader.GetMainElfBase()).value();
+      auto Entry = SyscallHandler->LookupExecutableFileSection(Thread, Loader.GetMainElfBase()).value();
       CTX->GetCodeCache().SaveData(*Thread, fd, Entry, 0 /* TODO: Use static base address information if available */);
     }
     std::filesystem::rename(FilenameNew.c_str(), Filename.c_str());
