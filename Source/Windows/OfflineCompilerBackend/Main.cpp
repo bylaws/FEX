@@ -27,6 +27,7 @@
 
 #include "Common/ArgumentLoader.h"
 #include "Common/Config.h"
+#include "Common/JITGuardPage.h"
 #include "Common/CPUFeatures.h"
 #include "Common/Handle.h"
 #include "Common/ImageTracker.h"
@@ -43,6 +44,7 @@ namespace {
 std::optional<FEX::Windows::InvalidationTracker> InvalidationTracker;
 std::optional<FEX::Windows::ImageTracker> ImageTracker;
 std::optional<FEX::Windows::OvercommitTracker> OvercommitTracker;
+FEXCore::Core::InternalThreadState* Thread{};
 
 struct ImageInfo {
   FEXCore::ExecutableFileInfo Info;
@@ -284,6 +286,36 @@ LONG ExceptionHandler(_EXCEPTION_POINTERS* ExceptionInfo) {
     if (OvercommitTracker->HandleAccessViolation(FaultAddress)) {
       return EXCEPTION_CONTINUE_EXECUTION;
     }
+
+#ifdef _M_ARM_64EC
+    ARM64_NT_CONTEXT ArmContext{};
+    auto *Context = &ArmContext;
+#else
+    auto *Context = ExceptionInfo->ContextRecord;
+#endif
+    if (FEX::Windows::JITGuardPage::HandleJITGuardPage(Thread, reinterpret_cast<void*>(FaultAddress), Context->X,
+                                                       reinterpret_cast<__uint128_t*>(Context->V), &Context->Pc)) {
+#ifdef _M_ARM_64EC
+      auto *ECContext = reinterpret_cast<ARM64EC_NT_CONTEXT *>(ExceptionInfo->ContextRecord);
+      ECContext->X0 = Context->X0;
+      ECContext->X19 = Context->X19;
+      ECContext->X20 = Context->X20;
+      ECContext->X21 = Context->X21;
+      ECContext->X22 = Context->X22;
+      ECContext->X25 = Context->X25;
+      ECContext->X26 = Context->X26;
+      ECContext->X27 = Context->X27;
+      ECContext->Fp = Context->Fp;
+      ECContext->Lr = Context->Lr;
+      ECContext->Sp = Context->Sp;
+      ECContext->Pc = Context->Pc;
+
+      for (size_t i = 0; i < 8; ++i) {
+        memcpy(&reinterpret_cast<__uint128_t*>(ECContext->V)[8 + i], &reinterpret_cast<__uint128_t*>(Context->V)[8 + i], sizeof(uint64_t));
+      }
+#endif
+      return EXCEPTION_CONTINUE_EXECUTION;
+    }
   }
   return EXCEPTION_CONTINUE_SEARCH;
 }
@@ -376,7 +408,7 @@ int main(int argc, char** argv) {
   // Images that don't need recompile will be filtered out here
   auto [MappedImages, IsSteamStubPresent] = TryMapImages(std::move(Images));
 
-  auto* Thread = CTX->CreateThread(0, 0);
+  Thread = CTX->CreateThread(0, 0);
   auto Frame = Thread->CurrentFrame;
   FEXCore::Core::CPUState::gdt_segment Segments[32] {};
 
