@@ -1,5 +1,4 @@
 set(TARGET_NAME FEXOfflineCompiler)
-
 add_executable(${TARGET_NAME} Main.cpp $<TARGET_OBJECTS:FEXCore_object>)
 patch_library_wine(${TARGET_NAME})
 

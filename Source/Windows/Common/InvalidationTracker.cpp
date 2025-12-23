@@ -254,6 +254,7 @@ void InvalidationTracker::DisableSMCDetection() {
 }
 
 void InvalidationTracker::InvalidateIntervalInternal(uint64_t Address, uint64_t Size) {
+  LogMan::Msg::EFmt("Invalidate {:X} {:X}", Address, Size);
   std::scoped_lock Lock(CTX.GetCodeInvalidationMutex());
   CTX.InvalidateCodeBuffersCodeRange(Address, Size);
   for (auto Thread : Threads) {

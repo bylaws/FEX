@@ -40,11 +40,12 @@
 #include "SteamStub.h"
 #include "DummyHandlers.h"
 
+
 namespace {
 std::optional<FEX::Windows::InvalidationTracker> InvalidationTracker;
 std::optional<FEX::Windows::ImageTracker> ImageTracker;
 std::optional<FEX::Windows::OvercommitTracker> OvercommitTracker;
-FEXCore::Core::InternalThreadState* Thread{};
+thread_local FEXCore::Core::InternalThreadState* Thread {};
 
 struct ImageInfo {
   FEXCore::ExecutableFileInfo Info;
@@ -67,13 +68,162 @@ struct ImageInfo {
   }
 };
 
-void MsgHandler(LogMan::DebugLevels Level, const char* Message) {
-  fmt::print("[{}] {}\n", LogMan::DebugLevelStr(Level), Message);
+void InitializeWorkerContext(FEXCore::Core::InternalThreadState* ThreadState) {
+  auto Frame = ThreadState->CurrentFrame;
+  FEXCore::Core::CPUState::gdt_segment Segments[32] {};
+
+#ifdef _M_ARM64EC
+  static constexpr size_t DefaultCS {FEXCore::Core::CPUState::DEFAULT_USER_CS};
+#else
+  static constexpr size_t DefaultCS {4};
+#endif
+
+  auto& GDT = Segments[DefaultCS];
+  FEXCore::Core::CPUState::SetGDTBase(&GDT, 0);
+  FEXCore::Core::CPUState::SetGDTLimit(&GDT, 0xF'FFFFU);
+#ifdef _M_ARM64EC
+  GDT.L = 1;
+  GDT.D = 0;
+#else
+  GDT.L = 0;
+  GDT.D = 1;
+#endif
+
+  Frame->State.segment_arrays[FEXCore::Core::CPUState::SEGMENT_ARRAY_INDEX_GDT] = &Segments[0];
+  Frame->State.segment_arrays[FEXCore::Core::CPUState::SEGMENT_ARRAY_INDEX_LDT] = &Segments[0];
+  Frame->State.cs_idx = DefaultCS << 3;
+  Frame->State.cs_cached = FEXCore::Core::CPUState::CalculateGDTBase(GDT);
 }
 
-void AssertHandler(const char* Message) {
-  fmt::print("[ASSERT] {}\n", Message);
-}
+class JITThreadPool {
+public:
+  JITThreadPool(FEXCore::Context::Context* Ctx)
+    : CTX(Ctx) {
+    size_t ThreadCount = std::thread::hardware_concurrency();
+    if (ThreadCount > 1) {
+      ThreadCount--;
+    }
+
+    Workers.reserve(ThreadCount);
+    ThreadStates.reserve(ThreadCount);
+
+    for (size_t i = 0; i < ThreadCount; ++i) {
+      Workers.emplace_back(&JITThreadPool::WorkerLoop, this);
+    }
+
+    // Wait for all threads to initialize their ThreadState
+    std::unique_lock<std::mutex> Lock(JobMutex);
+    InitCV.wait(Lock, [this, ThreadCount] { return ThreadStates.size() == ThreadCount; });
+  }
+
+  ~JITThreadPool() {
+    {
+      std::unique_lock<std::mutex> Lock(JobMutex);
+      ShouldStop = true;
+    }
+    JobCV.notify_all();
+    for (auto& T : Workers) {
+      T.join();
+    }
+
+    for (auto* State : ThreadStates) {
+      CTX->DestroyThread(State);
+    }
+  }
+
+  std::span<FEXCore::Core::InternalThreadState*> GetThreads() {
+    return ThreadStates;
+  }
+
+  void StartCompilation(const std::vector<uint64_t>& FlattenedBlocks, uint64_t Base) {
+    std::unique_lock<std::mutex> Lock(JobMutex);
+    CurrentBlocks = &FlattenedBlocks;
+    CurrentBaseAddress = Base;
+    NextBlockIndex.store(0);
+
+    // 1. Reset active workers to total count
+    ActiveWorkers = Workers.size();
+
+    // 2. Increment Job ID. This is the "Go" signal.
+    // Workers will only run if CurrentJobId > LocalJobId
+    CurrentJobId++;
+    LogMan::Msg::EFmt("Post job  {}", CurrentJobId);
+
+    JobCV.notify_all();
+  }
+
+  void WaitForCompletion() {
+    std::unique_lock<std::mutex> Lock(JobMutex);
+    // Wait until all workers have decremented the counter
+    DoneCV.wait(Lock, [this] { return ActiveWorkers == 0; });
+    CurrentBlocks = nullptr;
+  }
+
+private:
+  FEXCore::Context::Context* CTX;
+  std::vector<std::thread> Workers;
+  std::vector<FEXCore::Core::InternalThreadState*> ThreadStates;
+
+  // Work Data
+  const std::vector<uint64_t>* CurrentBlocks = nullptr;
+  uint64_t CurrentBaseAddress = 0;
+  std::atomic<size_t> NextBlockIndex {0};
+
+  // Synchronization
+  std::mutex JobMutex;
+  std::condition_variable JobCV;
+  std::condition_variable DoneCV;
+  std::condition_variable InitCV;
+
+  size_t CurrentJobId = 0;
+  size_t ActiveWorkers = 0;
+  bool ShouldStop = false;
+
+  void WorkerLoop() {
+    Thread = CTX->CreateThread(0, 0);
+    InitializeWorkerContext(Thread);
+
+    {
+      std::unique_lock<std::mutex> Lock(JobMutex);
+      ThreadStates.push_back(Thread);
+      InitCV.notify_one();
+    }
+
+    size_t LocalJobId = 0;
+
+    while (true) {
+      const std::vector<uint64_t>* LocalBlocks = nullptr;
+      uint64_t LocalBase = 0;
+
+      {
+        std::unique_lock<std::mutex> Lock(JobMutex);
+
+        JobCV.wait(Lock, [this, LocalJobId] { return CurrentJobId > LocalJobId || ShouldStop; });
+
+        if (ShouldStop) {
+          break;
+        }
+
+        LocalJobId = CurrentJobId;
+        LocalBlocks = CurrentBlocks;
+        LocalBase = CurrentBaseAddress;
+      }
+
+      size_t Idx;
+      while ((Idx = NextBlockIndex.fetch_add(1, std::memory_order_relaxed)) < LocalBlocks->size()) {
+        CTX->CompileRIP(Thread, LocalBase + (*LocalBlocks)[Idx]);
+      }
+
+      {
+        std::unique_lock<std::mutex> Lock(JobMutex);
+        ActiveWorkers--;
+        if (ActiveWorkers == 0) {
+          DoneCV.notify_one();
+        }
+      }
+    }
+  }
+};
 
 bool RelocateMappedImage(HMODULE Module) {
   const auto* NtHeaders = reinterpret_cast<FEX::Windows::ArchImageNtHeaders*>(RtlImageNtHeader(Module));
@@ -288,15 +438,15 @@ LONG ExceptionHandler(_EXCEPTION_POINTERS* ExceptionInfo) {
     }
 
 #ifdef _M_ARM_64EC
-    ARM64_NT_CONTEXT ArmContext{};
-    auto *Context = &ArmContext;
+    ARM64_NT_CONTEXT ArmContext {};
+    auto* Context = &ArmContext;
 #else
-    auto *Context = ExceptionInfo->ContextRecord;
+    auto* Context = ExceptionInfo->ContextRecord;
 #endif
     if (FEX::Windows::JITGuardPage::HandleJITGuardPage(Thread, reinterpret_cast<void*>(FaultAddress), Context->X,
                                                        reinterpret_cast<__uint128_t*>(Context->V), &Context->Pc)) {
 #ifdef _M_ARM_64EC
-      auto *ECContext = reinterpret_cast<ARM64EC_NT_CONTEXT *>(ExceptionInfo->ContextRecord);
+      auto* ECContext = reinterpret_cast<ARM64EC_NT_CONTEXT*>(ExceptionInfo->ContextRecord);
       ECContext->X0 = Context->X0;
       ECContext->X19 = Context->X19;
       ECContext->X20 = Context->X20;
@@ -321,9 +471,6 @@ LONG ExceptionHandler(_EXCEPTION_POINTERS* ExceptionInfo) {
 }
 
 int main(int argc, char** argv) {
-  LogMan::Throw::InstallHandler(AssertHandler);
-  LogMan::Msg::InstallHandler(MsgHandler);
-
   if (argc < 4) {
     fmt::print("Usage: {} <main_image_name> <image_cache_dir> <codemap_file>\n", argv[0]);
     return 1;
@@ -340,6 +487,7 @@ int main(int argc, char** argv) {
   FEX::Config::LoadConfig(MainImageName, _environ, FEX::ReadPortabilityInformation());
   FEXCore::Config::ReloadMetaLayer();
 
+  FEX::Windows::Logging::Init();
 #ifdef _M_ARM64EC
   FEXCore::Config::Set(FEXCore::Config::CONFIG_IS64BIT_MODE, "1");
 #else
@@ -404,36 +552,11 @@ int main(int argc, char** argv) {
   std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*> Threads;
   InvalidationTracker.emplace(*CTX, Threads);
   ImageTracker.emplace(*CTX, true);
-
-  // Images that don't need recompile will be filtered out here
-  auto [MappedImages, IsSteamStubPresent] = TryMapImages(std::move(Images));
+  JITThreadPool Pool(CTX.get());
 
   Thread = CTX->CreateThread(0, 0);
-  auto Frame = Thread->CurrentFrame;
-  FEXCore::Core::CPUState::gdt_segment Segments[32] {};
-
-#ifdef _M_ARM64EC
-  static constexpr size_t DefaultCS {FEXCore::Core::CPUState::DEFAULT_USER_CS};
-#else
-  static constexpr size_t DefaultCS {4};
-#endif
-
-  // Setup initial code-segment GDT
-  auto& GDT = Segments[DefaultCS];
-  FEXCore::Core::CPUState::SetGDTBase(&GDT, 0);
-  FEXCore::Core::CPUState::SetGDTLimit(&GDT, 0xF'FFFFU);
-#ifdef _M_ARM64EC
-  GDT.L = 1; // L = Long Mode = 64-bit
-  GDT.D = 0; // D = Default Operand SIze = Reserved
-#else
-  GDT.L = 0; // L = Long Mode = 32-bit
-  GDT.D = 1; // D = Default Operand Size = 32-bit
-#endif
-
-  Frame->State.segment_arrays[FEXCore::Core::CPUState::SEGMENT_ARRAY_INDEX_GDT] = &Segments[0];
-  Frame->State.segment_arrays[FEXCore::Core::CPUState::SEGMENT_ARRAY_INDEX_LDT] = &Segments[0];
-  Frame->State.cs_idx = DefaultCS << 3;
-  Frame->State.cs_cached = FEXCore::Core::CPUState::CalculateGDTBase(GDT);
+  // Images that don't need recompile will be filtered out here
+  auto [MappedImages, IsSteamStubPresent] = TryMapImages(std::move(Images));
 
   if (!std::filesystem::exists(ImageCacheDir)) {
     if (!std::filesystem::create_directories(ImageCacheDir)) {
@@ -445,22 +568,56 @@ int main(int argc, char** argv) {
   for (auto& Image : MappedImages) {
     LogMan::Msg::IFmt("Compiling module {}: {} entrypoints", Image.Info.Contents.Filename, Image.Info.Contents.Blocks.size());
     CTX->ClearCodeCache(Thread, true);
+    std::vector<uint64_t> FlattenedBlocks;
+    FlattenedBlocks.reserve(Image.Info.Contents.Blocks.size());
+    FlattenedBlocks.assign(Image.Info.Contents.Blocks.begin(), Image.Info.Contents.Blocks.end());
 
-    for (uint64_t EntryPoint : Image.Info.Contents.Blocks) {
-      CTX->CompileRIP(Thread, Image.BaseAddress + EntryPoint);
-    }
+    Pool.StartCompilation(FlattenedBlocks, Image.BaseAddress);
+
+    Pool.WaitForCompletion();
 
     auto Filename = ImageCacheDir / FEXCore::CodeMap::GetBaseFilename(Image.SectionInfo.FileInfo, false);
     auto StagingFilename = Filename;
     StagingFilename += ".new";
 
-    int fd = _open(StagingFilename.string().c_str(), _O_CREAT | _O_WRONLY | _O_BINARY, 0644);
-    if (fd != -1) {
-      CTX->GetCodeCache().SaveData(*Thread, fd, Image.SectionInfo, Image.BaseAddress);
-      _close(fd);
+    HANDLE hFile = CreateFileW(StagingFilename.c_str(), GENERIC_READ | GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
 
-      std::error_code ec;
-      std::filesystem::rename(StagingFilename, Filename, ec);
+    if (hFile != INVALID_HANDLE_VALUE) {
+      HANDLE hMap = nullptr;
+      void* MappedPtr = nullptr;
+
+      bool Success = CTX->GetCodeCache().SaveData(Pool.GetThreads(), Image.SectionInfo, Image.BaseAddress, [&](size_t TotalSize) -> void* {
+        LARGE_INTEGER LiSize;
+        LiSize.QuadPart = TotalSize;
+        if (!SetFilePointerEx(hFile, LiSize, nullptr, FILE_BEGIN)) {
+          return nullptr;
+        }
+        if (!SetEndOfFile(hFile)) {
+          return nullptr;
+        }
+        hMap = CreateFileMappingW(hFile, nullptr, PAGE_READWRITE, 0, 0, nullptr);
+        if (!hMap) {
+          return nullptr;
+        }
+        MappedPtr = MapViewOfFile(hMap, FILE_MAP_WRITE, 0, 0, 0);
+        return MappedPtr;
+      });
+
+      if (MappedPtr) {
+        UnmapViewOfFile(MappedPtr);
+      }
+      if (hMap) {
+        CloseHandle(hMap);
+      }
+      CloseHandle(hFile);
+
+      if (Success) {
+        std::error_code ec;
+        std::filesystem::rename(StagingFilename, Filename, ec);
+      } else {
+        std::filesystem::remove(StagingFilename);
+        LogMan::Msg::EFmt("Failed to save code cache data");
+      }
     } else {
       LogMan::Msg::EFmt("Failed to open output file: {}", StagingFilename.string());
     }
@@ -477,6 +634,8 @@ int main(int argc, char** argv) {
       }
     }
   }
+  LogMan::Msg::IFmt("Done");
+
 
   return 0;
 }

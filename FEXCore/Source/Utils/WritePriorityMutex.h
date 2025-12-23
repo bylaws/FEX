@@ -270,18 +270,15 @@ private:
 
   // Readers wait for Futex bits [31:16] to be zero.
   void FutexWaitForReadAvailable(uint32_t Expected) {
-    auto ReadWaiterAddress = reinterpret_cast<uint8_t*>(&Futex) + 2;
-    uint16_t smol_Expected = Expected >> 16;
-    WaitOnAddress(ReadWaiterAddress, &smol_Expected, sizeof(smol_Expected), INFINITE);
+    WaitOnAddress(&Futex, &Expected, sizeof(Futex), INFINITE);
   }
 
   void FutexWakeWriter() {
-    WakeByAddressSingle(&Futex);
+    WakeByAddressAll(&Futex);
   }
 
   void FutexWakeReaders() {
-    auto ReadWaiterAddress = reinterpret_cast<uint8_t*>(&Futex) + 2;
-    WakeByAddressAll(ReadWaiterAddress);
+    WakeByAddressAll(&Futex);
   }
 #endif
 

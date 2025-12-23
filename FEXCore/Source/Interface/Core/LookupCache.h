@@ -130,6 +130,7 @@ struct GuestToHostMap {
 
     for (auto it = lower; it != upper; it++) {
       for (const auto& Entry : it->second) {
+        LogMan::Msg::EFmt("DEL {:X}", Entry);
         Erase(Entry, lk);
       }
     }
@@ -338,6 +339,7 @@ public:
 
     for (auto it = lower; it != upper; it++) {
       for (const auto& Entry : it->second) {
+        LogMan::Msg::EFmt("DEL LOC {:X}", Entry);
         InvalidateCache(Entry, lk);
       }
     }

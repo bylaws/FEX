@@ -18,9 +18,9 @@
 namespace FEXCore {
 namespace CPU {
 
-  static constexpr size_t INITIAL_CODE_SIZE = 1024 * 1024 * 16;
+  static constexpr size_t INITIAL_CODE_SIZE = 1024 * 1024 * 1024;
   // We don't want to move above 128MB atm because that means we will have to encode longer jumps
-  static constexpr size_t MAX_CODE_SIZE = 1024 * 1024 * 128;
+  static constexpr size_t MAX_CODE_SIZE = 1024 * 1024 * 1024;
 
   constexpr static uint64_t NamedVectorConstants[FEXCore::IR::NamedVectorConstant::NAMED_VECTOR_CONST_POOL_MAX][2] = {
     {0x0003'0002'0001'0000ULL, 0x0007'0006'0005'0004ULL}, // NAMED_VECTOR_INCREMENTAL_U16_INDEX
