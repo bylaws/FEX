@@ -96,6 +96,128 @@ void InitializeThreadContext(FEXCore::Core::InternalThreadState* ThreadState) {
   Frame->State.cs_cached = FEXCore::Core::CPUState::CalculateGDTBase(GDTSegments[DefaultCS]);
 }
 
+// Work-stealing thread pool for compilation jobs
+class JITThreadPool {
+public:
+  JITThreadPool(FEXCore::Context::Context* CTX)
+    : CTX {CTX} {
+    auto ThreadCount = std::thread::hardware_concurrency();
+    if (ThreadCount == 0) {
+      ThreadCount = 1;
+    }
+
+    for (size_t i = 0; i < ThreadCount; ++i) {
+      Workers.emplace_back(&JITThreadPool::WorkerLoop, this);
+    }
+
+    // Wait for all threads to initialize their ThreadState
+    std::unique_lock<std::mutex> Lock(JobMutex);
+    InitCV.wait(Lock, [&] { return ThreadStates.size() == ThreadCount; });
+  }
+
+  ~JITThreadPool() {
+    {
+      std::scoped_lock Lock(JobMutex);
+      ShouldStop = true;
+    }
+    JobCV.notify_all();
+    for (auto& T : Workers) {
+      T.join();
+    }
+  }
+
+  std::span<FEXCore::Core::InternalThreadState*> GetThreads() {
+    return ThreadStates;
+  }
+
+  void StartCompilation(const std::vector<uint64_t>& FlattenedBlocks, uint64_t Base) {
+    {
+      std::scoped_lock Lock(JobMutex);
+      // Setup state for the next compilation job
+      CurrentBlocks = &FlattenedBlocks;
+      CurrentBaseAddress = Base;
+      NextBlockIndex.store(0);
+
+      // Require acknowledgement from all workers for the new job to avoid needing to double buffer things.
+      ActiveWorkers = Workers.size();
+      CurrentJobId++;
+    }
+    JobCV.notify_all();
+  }
+
+  void WaitForCompletion() {
+    std::unique_lock Lock(JobMutex);
+    // Wait for all workers to have seen the previously posted compilation job and signalled that no blocks remain.
+    DoneCV.wait(Lock, [&] { return ActiveWorkers == 0; });
+    CurrentBlocks = nullptr;
+  }
+
+private:
+  FEXCore::Context::Context* CTX;
+  std::vector<std::thread> Workers;
+  std::vector<FEXCore::Core::InternalThreadState*> ThreadStates;
+
+  std::atomic<size_t> NextBlockIndex {0};
+
+  std::mutex JobMutex;
+  std::condition_variable JobCV;
+  std::condition_variable DoneCV;
+  std::condition_variable InitCV;
+  const std::vector<uint64_t>* CurrentBlocks = nullptr;
+  uint64_t CurrentBaseAddress = 0;
+  size_t CurrentJobId = 0;
+  size_t ActiveWorkers = 0;
+  bool ShouldStop = false;
+
+  void WorkerLoop() {
+    ThisThread = CTX->CreateThread(0, 0);
+    InitializeThreadContext(ThisThread);
+
+    {
+      std::scoped_lock Lock(JobMutex);
+      ThreadStates.push_back(ThisThread);
+      InitCV.notify_one();
+    }
+
+    size_t LocalJobId = 0;
+
+    while (true) {
+      const std::vector<uint64_t>* LocalBlocks = nullptr;
+      uint64_t LocalBase = 0;
+
+      {
+        std::unique_lock Lock(JobMutex);
+
+        // Wait until work that is newer than the previously handled job is available
+        JobCV.wait(Lock, [&] { return CurrentJobId > LocalJobId || ShouldStop; });
+
+        if (ShouldStop) {
+          CTX->DestroyThread(ThisThread);
+          break;
+        }
+
+        LocalJobId = CurrentJobId;
+        LocalBlocks = CurrentBlocks;
+        LocalBase = CurrentBaseAddress;
+      }
+
+      size_t Idx;
+      while ((Idx = NextBlockIndex.fetch_add(1, std::memory_order_relaxed)) < LocalBlocks->size()) {
+        CTX->CompileRIP(ThisThread, LocalBase + (*LocalBlocks)[Idx]);
+      }
+
+      {
+        // Acknowledge that this thread has exhausted all compilation work visible to it
+        std::scoped_lock Lock(JobMutex);
+        ActiveWorkers--;
+        if (ActiveWorkers == 0) {
+          DoneCV.notify_one();
+        }
+      }
+    }
+  }
+};
+
 bool RelocateMappedImage(HMODULE Module) {
   const auto* NtHeaders = reinterpret_cast<FEX::Windows::ArchImageNtHeaders*>(RtlImageNtHeader(Module));
   if (!NtHeaders) {
@@ -422,6 +544,7 @@ int main(int argc, char** argv) {
   std::unordered_map<DWORD, FEXCore::Core::InternalThreadState*> Threads;
   InvalidationTracker.emplace(*CTX, Threads);
   ImageTracker.emplace(*CTX, true);
+  JITThreadPool Pool(CTX.get());
 
   ThisThread = CTX->CreateThread(0, 0);
   InitializeThreadContext(ThisThread);
@@ -438,10 +561,13 @@ int main(int argc, char** argv) {
   for (auto& Image : MappedImages) {
     LogMan::Msg::IFmt("Compiling module {}: {} entrypoints", Image.Info.Contents.Filename, Image.Info.Contents.Blocks.size());
     CTX->ClearCodeCache(ThisThread, true);
+    std::vector<uint64_t> FlattenedBlocks;
+    FlattenedBlocks.reserve(Image.Info.Contents.Blocks.size());
+    FlattenedBlocks.assign(Image.Info.Contents.Blocks.begin(), Image.Info.Contents.Blocks.end());
 
-    for (const auto Block : Image.Info.Contents.Blocks) {
-      CTX->CompileRIP(ThisThread, Image.BaseAddress + Block);
-    }
+    Pool.StartCompilation(FlattenedBlocks, Image.BaseAddress);
+
+    Pool.WaitForCompletion();
 
     auto Filename = ImageCacheDir / FEXCore::CodeMap::GetBaseFilename(Image.SectionInfo.FileInfo, false);
     auto StagingFilename = Filename;
@@ -453,8 +579,7 @@ int main(int argc, char** argv) {
       FEX::Windows::ScopedHandle MapHandle {};
       void* MappedPtr {};
 
-      FEXCore::Core::InternalThreadState* CompilerThreads[] = {ThisThread};
-      bool Success = CTX->GetCodeCache().SaveData(CompilerThreads, Image.SectionInfo, Image.BaseAddress, [&](size_t TotalSize) -> void* {
+      bool Success = CTX->GetCodeCache().SaveData(Pool.GetThreads(), Image.SectionInfo, Image.BaseAddress, [&](size_t TotalSize) -> void* {
         LARGE_INTEGER LiSize;
         LiSize.QuadPart = TotalSize;
         if (!SetFilePointerEx(*FileHandle, LiSize, nullptr, FILE_BEGIN)) {
